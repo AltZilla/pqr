@@ -30,35 +30,17 @@ class Queue(asyncio.Queue):
         if not self.dm_task.is_running():
            self.dm_task.start()
 
-class TimeConverter(commands.Converter):
-    async def convert(self, ctx: commands.Context, argument: str):
-       matches = re.findall(r'([0-9]+) *([a-zA-Z]+)', argument)
-       seconds = 0
-       for match in matches:
-           if match[1].startswith("s"):
-              seconds  += int(match[0])
-           elif match[1].startswith("m"):
-              seconds  += (int(match[0]) * 60)
-           elif match[1].startswith("h"):
-              seconds  += (int(match[0]) * 3600)
-           elif match[1].startswith("d"):
-              seconds  += (int(match[0]) * 86400)
-           elif match[1].startswith("w"):
-              seconds  += (int(match[0]) * 604800)
-           elif match[1].startswith("y"):
-              seconds  += (int(match[0]) * 31536000)
-           else:
-              seconds += int(match[0])
-       return seconds
-
 class HighlightView(discord.ui.View):
    def __init__(self, message: discord.Message, highlights: list, positions: List[int] = None):
        super().__init__(timeout = None)
        self.message = message
+       self.content = message.content
+       self.attachments = message.attachments
+       self.embeds = message.embeds
        self.highlights = highlights
        self.data = {}
 
-       if len(self.message.content) > 500 or self.message.attachments or self.message.embeds:
+       if len(self.content) > 500 or self.attachments or self.embeds:
 
           button = discord.ui.Button(
              label = 'View Message',
@@ -77,13 +59,12 @@ class HighlightView(discord.ui.View):
 
    async def execute(self, interaction: discord.Interaction):
        
-       content = self.message.content
        for highlight in self.highlights:
            regex = re.compile(rf'\b{re.escape(highlight)}\b', flags = re.IGNORECASE)
            replace_re = r'**__\g<0>__**'
-           content = regex.sub(replace_re, content)
+           content = regex.sub(replace_re, self.content)
 
-           for embed in self.message.embeds:
+           for embed in self.embeds:
                embed.description = regex.sub(replace_re, embed.description)[:2000] if embed.description else None
                fields = []
                for field in embed.fields:
@@ -94,8 +75,8 @@ class HighlightView(discord.ui.View):
             
        data = {
              'content': content,
-             'embeds': self.message.embeds,
-             'files': [await attach.to_file() for attach in self.message.attachments],
+             'embeds': self.embeds,
+             'files': [await attach.to_file() for attach in self.attachments],
              'view': discord.ui.View.from_message(self.message),
              'ephemeral': True
        }

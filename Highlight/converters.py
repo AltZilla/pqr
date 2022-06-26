@@ -1,5 +1,6 @@
 import discord
 import argparse
+import re
 
 from fuzzywuzzy import process
 from redbot.core.commands import BadArgument, Converter, Context, GuildChannelConverter, ChannelNotFound
@@ -17,6 +18,27 @@ class FuzzyChannels(Converter):
             if isinstance(channel, discord.CategoryChannel):
                raise BadArgument('The channel should be a Text channel or Voice channel, not a category.')
             return channel
+
+class TimeConverter(Converter):
+    async def convert(self, ctx: Context, argument: str):
+       matches = re.findall(r'([0-9]+) *([a-zA-Z]+)', argument)
+       seconds = 0
+       for match in matches:
+           if match[1].startswith("s"):
+              seconds  += int(match[0])
+           elif match[1].startswith("m"):
+              seconds  += (int(match[0]) * 60)
+           elif match[1].startswith("h"):
+              seconds  += (int(match[0]) * 3600)
+           elif match[1].startswith("d"):
+              seconds  += (int(match[0]) * 86400)
+           elif match[1].startswith("w"):
+              seconds  += (int(match[0]) * 604800)
+           elif match[1].startswith("y"):
+              seconds  += (int(match[0]) * 31536000)
+           else:
+              seconds += int(match[0])
+       return seconds
         
 
 class NoExitParser(argparse.ArgumentParser):
