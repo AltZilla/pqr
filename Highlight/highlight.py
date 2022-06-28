@@ -285,7 +285,7 @@ class Highlight(commands.Cog):
                            extra = f'highlights for {channel}' if channel else 'guild highlights'
                       ))
 
-               if len(config) + len(word['words']) >= (limit := 10 if channel else 25):
+               if len(user_config) + len(word['words']) >= (limit := 10 if channel else 25):
                   return await ctx.reply('You have reached the maximum of `{limit}` highlights for this {type}.'.format(
                      limit = limit,
                      type = 'channel' if channel else 'guild'
