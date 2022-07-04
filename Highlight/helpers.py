@@ -1,35 +1,55 @@
-import asyncio
 import discord
-import contextlib
-import aiohttp
 import re
 
-from discord.ext import tasks
-from redbot.core import commands
-from typing import (
-    List,
-    Optional
-)
+from redbot.core.utils.chat_formatting import humanize_list
+from typing import List
 
-class Queue(asyncio.Queue):
-    def __init__(self, maxsize = 0):
-        super().__init__(maxsize = maxsize)
+class Matches:
+    def __init__(self):
+        self._matches = []
 
-    @tasks.loop(seconds = 3)
-    async def dm_task(self):
-        if not self.empty():
-           member, response = await self.get()
-           with contextlib.suppress(discord.Forbidden):
-              await member.send(**response)
+    def __len__(self):
+        return self._matches.__len__()
+
+    def __contains__(self, con: str):
+        for item in self._matches:
+            if item['highlight'].strip() == con.strip():
+               return True
+        return False
+
+    def add_match(self, match: re.Match, highlight_data: dict):
+        if not any(h['highlight'] == highlight_data['highlight'] for h in self._matches):
+           highlight_data['match'] = match.group(0)
+           self._matches.append(highlight_data)
+
+    def remove_match(self, match: re.Match, Highlight_data: dict):
+        for item in self._matches:
+            if item['match'] == match.group(0) and item['highlight'] == Highlight_data['highlight']:
+               self.matches.remove(item)
+
+    def format_response(self):
+        response = []
+        for item in self._matches:
+            conversions = {
+                'default': lambda: f'\"{item["match"]}\"',
+                'wildcard': lambda: f'\"{item["match"]}\"' if item['match'].strip().lower() == item['highlight'].strip().lower() else f'\"{item["match"]}\" from wildcard `({item["highlight"]})`',
+                'regex': lambda: f'\"{item["match"]}\" from regex `({item["highlight"]})`'
+            }
+            response.append(conversions.get(item['type'])())
+        return humanize_list(response)
+
+    def format_title(self):
+        matches = [item['match'].strip() for item in self._matches]
+
+        if len(matches) < 3:
+           title = ', '.join(matches)
         else:
-           self.dm_task.cancel()
+           title = ', '.join(matches[:2]) + f' + {len(matches) - 2} more.'
 
-
-    async def put(self, item):
-        await super().put(item)
-        if not self.dm_task.is_running():
-           self.dm_task.start()
-
+        if len(title) > 50:
+           title = title[:47] + '...'
+        return title
+    
 class HighlightView(discord.ui.View):
    def __init__(self, message: discord.Message, highlights: list, positions: List[int] = None):
        super().__init__(timeout = None)
@@ -91,39 +111,3 @@ class HighlightView(discord.ui.View):
        )
        self.add_item(button)
        await interaction.message.edit(view = self)
-
-class OCRSpace:
-    def __init__(
-        self,
-        endpoint='https://api.ocr.space/parse/image',
-        api_key='K85512258788957',
-        language='eng',
-        **kwargs,
-    ):
-        self.endpoint = endpoint
-        self.payload = {
-            'isOverlayRequired': True,
-            'apikey': api_key,
-            'language': language,
-            **kwargs
-        }
-
-    async def _parse(self, raw):
-        if type(raw) == str:
-            raise Exception(raw)
-        if raw['IsErroredOnProcessing']:
-            raise Exception(raw['ErrorMessage'][0])
-        return raw['ParsedResults'][0]['ParsedText']
-
-    async def ocr_url(self, url):
-        data = self.payload
-        data['url'] = url
-
-        async with aiohttp.ClientSession() as client:
-            async with client.request(
-               method = 'POST',
-               url = self.endpoint,
-               data = data,
-           ) as resp:
-               raw = await resp.json()
-        return await self._parse(raw)

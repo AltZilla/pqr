@@ -1,4 +1,5 @@
 import contextlib
+import aiohttp
 import discord
 import asyncio
 import time
@@ -10,35 +11,43 @@ import re
 
 from io import BytesIO
 from copy import copy
+from discord.ext import commands as dpy_commands
 from redbot.core import commands, Config
 from redbot.core.utils.chat_formatting import humanize_list, humanize_timedelta
 from redbot.core.utils.menus import start_adding_reactions
 from redbot.core.utils.predicates import ReactionPredicate
-from .helpers import Queue, HighlightView, OCRSpace
+from .helpers import HighlightView, Matches
 from .converters import HighlightFlagResolver, TimeConverter
-from .objects import Matches
 from stemming.porter2 import stem
 from typing import Union, List, Optional, Dict
 
+IMAGE_HIGHLIGHTS = True
+try:
+   import pytesseract
+   from PIL import Image
+except ImportError:
+   IMAGE_HIGHLIGHTS = False
+
+IMAGE_REGEX = re.compile(
+    r'(?:(?:https?):\/\/)?[\w\/\-?=%.]+\.(?:png|jpg|jpeg)+', flags = re.I
+)
 
 log = logging.getLogger('red.cogs.Highlight')
 
-def default_check():
-
-   async def predicate(ctx: commands.Context):
-      if ctx.author.guild_permissions.manage_guild:
-         return True
+async def allowed_check(ctx: commands.Context):
       allowed_roles = await ctx.cog.config.guild(ctx.guild).allowed_roles()
       if any(role.id in allowed_roles for role in ctx.author.roles) or allowed_roles == []:
          return True
       return False
-   return commands.check(predicate)
 
 class Highlight(commands.Cog):
 
       def __init__(self, bot: commands.Bot):
           self.bot = bot
           self.config = Config.get_conf(self, identifier = 1698497658475)
+          self.config.register_global(
+            min_cooldown = 30
+          )
           self.config.register_guild(
             highlights = {},
             allowed_roles = []
@@ -49,14 +58,11 @@ class Highlight(commands.Cog):
           self.config.register_member(
             blocks = [],
             cooldown = 60,
-            onlyoffline = False,
             bots = False,
+            embeds = False,
             images = False,
-            colour = discord.Colour.green().value
+            colour = 3066993
           )
-          self.queue = Queue(maxsize = 0)
-          self.ocr = OCRSpace()
-          self.ocr_count = 0
           self.last_seen = {}
           self.cooldowns = {}
       
@@ -69,14 +75,13 @@ class Highlight(commands.Cog):
 
       async def get_matches(self, highlight_data: List[dict], *, message_data: dict, config: dict) -> Matches:
           matches = Matches()
-          string = message_data['content']
+          string = message_data['message'].content
           if config['bots']:
              string += ' ' + message_data.get('bot_content', '')
 
           if config['images']:
              string += ' ' + message_data.get('attach_content', '')
 
-          # Might have to redo this.
           async def resolve(data: dict):
               s = copy(string)
               setting, type = (
@@ -107,10 +112,9 @@ class Highlight(commands.Cog):
 
           return matches
 
-      async def get_message_data(self, message: discord.Message):
-         message_data = {
-            'message': message,
-            'content': message.content if not message.author.bot else ''
+      async def get_message_raw(self, message: discord.Message):
+         message_raw = {
+            'message': message
          }
 
          if message.embeds:
@@ -129,20 +133,39 @@ class Highlight(commands.Cog):
                    texts.append(footer)
                 if (author := embed.author.name):
                    texts.append(author)
-            message_data['bot_content'] = ' '.join(texts) + (message.content if message.author.bot else '')
+            message_raw['bot_content'] = ' '.join(texts)
 
-
-         if message.attachments and not message.author.bot:
+         if message.attachments and IMAGE_HIGHLIGHTS:
             texts = []
+
+            async def image_to_string(attachment: discord.Attachment = None, url: str = None):
+               if attachment:
+                  temp_ = BytesIO(await attachment.read())
+               elif url:
+                  temp_ = BytesIO()
+                  async with aiohttp.ClientSession() as session:
+                     async with session.get(url) as r:
+                        raw = await r.read()
+                        temp_.write(raw)
+                        temp_.seek(0)
+               result = pytesseract.image_to_string(Image.open(temp_), lang = 'eng')
+               texts.append(result)
+                  
+            tasks = []
             for attach in message.attachments:
-                try:
-                     texts.append(await self.ocr.ocr_url(attach.url))
-                     self.ocr_count += 1
-                except Exception:
-                     continue
-            message_data['attach_content'] = ' '.join(texts)
+                tasks.append(image_to_string(attachment = attach))
+
+            for url in IMAGE_REGEX.findall(message.content):
+                tasks.append(image_to_string(url = url))
+
+            try:
+               await asyncio.wait_for(asyncio.gather(*tasks), timeout = 10)
+            except asyncio.TimeoutError:
+               pass
+            
+            message_raw['attach_content'] = ' '.join(texts)
          
-         return message_data
+         return message_raw
                
       @commands.Cog.listener('on_message')
       async def on_message(self, message: discord.Message):
@@ -155,49 +178,64 @@ class Highlight(commands.Cog):
 
          self.last_seen.setdefault(message.guild.id, {}).setdefault(message.author.id, {})[(message.channel.category or message.channel).id] = time.time()
 
-         guild_highlights, channel_highlights = (
+         guild_highlights, channel_highlights, min_cd = (
             await self.config.guild(message.guild).highlights(),
-            await self.config.channel(message.channel).highlights()
+            await self.config.channel(message.channel).highlights(),
+            await self.config.min_cooldown()
          )
          guild_highlights.update(channel_highlights)
 
-         message_data = await asyncio.create_task(self.get_message_data(message))
+         message_data = await self.get_message_raw(message)
 
-         for member, highlight in guild_highlights.items():
-             if not (member := message.guild.get_member(int(member))):
-                continue
-
-             data = await self.config.member(member).all()
-             matches = await self.get_matches(highlight_data = highlight, message_data = message_data, config = data)
-             if not matches:
-                continue
-             if message.channel.permissions_for(member).read_messages != True:
-                continue
-             if any(x.id in data['blocks'] for x in [message.author, message.channel]):
-                continue
-             if data['onlyoffline'] and not member.status == discord.Status.offline:
-                continue 
-             if last_seen := self.last_seen.get(message.guild.id, {}).get(member.id):
-                filtered = list(filter(lambda t: t > (time.time() - 300), last_seen.values()))
-                if ((x := last_seen.get((message.channel.category or message.channel).id)) and x > (time.time() - 300)) or len(filtered) > 2:
-                   continue
-             if (cd := self.cooldowns.get(message.guild.id, {}).get(member.id)) and cd >= (time.time() - data['cooldown']):
-                continue
-             self.cooldowns.setdefault(message.guild.id, {})[member.id] = time.time()
-
-             history = [
+         history = [
                '**[<t:{timestamp}:T>] {author}:** {content} {attachments} {embeds}'.format(
                      timestamp = int(message.created_at.timestamp()),
                      author = message.author,
                      content = message.content[:500],
-                     attachments = f' <Attachments {", ".join([f"[{index}({attach.url})]" for index, attach in enumerate(message.attachments)])}>' if message.attachments else '',
+                     attachments = f' <Attachments {", ".join([f"[{index}]({attach.url})" for index, attach in enumerate(message.attachments)])}>' if message.attachments else '',
                      embeds = ' [embeds]' if message.embeds else ''
                )
              ]
-             with contextlib.suppress(discord.NotFound): # This is done to prevent errors if the channel got deleted.
-                async for msg in message.channel.history(limit = 4, before = message.created_at):
-                     history.insert(0, f'[<t:{int(msg.created_at.timestamp())}:T>] **{msg.author}:** {msg.content[:200]}')
-             
+
+         # sorted_history = sorted(filter(lambda m: m.channel == message.channel and m.created_at < message.created_at, self.bot.cached_messages), key = lambda m: m.created_at, reverse = True)
+         # history.extend([f'[<t:{int(msg.created_at.timestamp())}:T>] **{msg.author}:** {msg.content[:200]}' for msg in sorted_history][:4])
+         with contextlib.suppress(discord.NotFound): 
+            async for msg in message.channel.history(limit = 4, before = message.created_at):
+                history.insert(0, f'[<t:{int(msg.created_at.timestamp())}:T>] **{msg.author}:** {msg.content[:200]}')
+         for member, highlight in guild_highlights.items():
+             member = message.guild.get_member(int(member))
+             if not member:
+                continue
+             data = await self.config.member(member).all()
+             cooldown = data['cooldown'] if data['cooldown'] < min_cd else min_cd
+             if (
+
+                (cd := self.cooldowns.get(message.guild.id, {}).get(member.id))
+                and cd >= (time.time() - cooldown)
+             ): 
+                 continue
+             last_seen = self.last_seen.get(message.guild.id, {}).get(member.id)
+             if last_seen:   
+                lsc, filtered = (
+                   last_seen.get((message.channel.category or message.channel).id, 0),
+                   list(filter(lambda t: t > (time.time() - 300), last_seen.values()))
+                )
+                if lsc > (time.time() - 300) or len(filtered) > 2:
+                   continue
+
+             matches = await self.get_matches(highlight_data = highlight, message_data = message_data, config = data)
+
+             if not matches:
+                continue
+             if (
+                not message.channel.permissions_for(member).read_message_history
+                or not message.channel.permissions_for(member).read_messages
+             ):
+                continue
+             if any(x.id in data['blocks'] for x in [message.author, message.channel]):
+                continue
+             self.cooldowns.setdefault(message.guild.id, {})[member.id] = time.time()
+
              embed = discord.Embed(
                 title = matches.format_title(),
                 description = '\n'.join(history),
@@ -210,14 +248,10 @@ class Highlight(commands.Cog):
                 text = 'Triggered At'
              )
 
-             await self.queue.put(
-                (
-                   member, {
-                      'content': f'In **{message.guild.name}** {message.channel.mention}, you were mentioned with the highlighted word{"s" if len(matches) > 1 else ""} {matches.format_response()}.',
-                      'embed': embed,
-                      'view': HighlightView(message, [d['highlight'] for d in highlight])
-                   }
-                )
+             await member.send(
+                content = f'In **{message.guild.name}** {message.channel.mention}, you were mentioned with the highlighted word{"s" if len(matches) > 1 else ""} {matches.format_response()}.',
+                embed = embed,
+                view =  HighlightView(message, [d['highlight'] for d in highlight])
              )
 
       @commands.Cog.listener('on_user_activity')
@@ -235,7 +269,7 @@ class Highlight(commands.Cog):
          self.bot.dispatch('user_activity', user, reaction.message.channel)
 
       @commands.group(name = 'highlight', aliases = ['hl'], invoke_without_command = True)
-      @commands.check(default_check())
+      @commands.check_any(commands.check(allowed_check), dpy_commands.has_permissions(manage_guild = True))
       @commands.cooldown(1, 5, commands.BucketType.user)
       async def highlight(self, ctx: commands.Context, *, word: HighlightFlagResolver):
          """Base command for highlights.
@@ -256,18 +290,16 @@ class Highlight(commands.Cog):
          You can add a maximum of 25 highlights per guild, and 10 per channel.
 
          **Flags:**
-           `--multiple`: Add multiple words to your highlights at once.
-           `--channel`: Add the word(s) to a specified channel's highlights, if the flag is used and no channel is specified, the channel where the command is ran is used.
-           `--wildcard`: Tries to search for bypasses by either underscores, dots and or special characters while fetching matches.
-           `--regex`: Add a Regular expression to your highlights. It is suggested you [learn regex](https://github.com/ziishaned/learn-regex) and [debug](https://regex101.com/) it first.
-           `--bots`: Recieve highlights from bots. This also highlights you for embeds.
-           `--images`: Recieve highlights from text in images, images sent by bots are ignored even if you have bot highlights enabled.
-         
+            > `--channel`: Add the word(s) to a specified channel's highlights, this defaults to the current channel.
+            > `--multiple`: Add multiple words to your highlights at once.
+            > `--wildcard`: Tries to search for bypasses by either underscores, dots and or special characters while fetching matches.
+            > `--regex`: Add a Regular expression to your highlights. It is suggested you [learn regex](https://github.com/ziishaned/learn-regex) and [debug](https://regex101.com/) it first.
+            > `--set <types...>`: Additional config for the added highlights. Valid Types: `bots`, `embeds` and `images`.
          """
 
          if any(len(x) > 50 for x in word['words']):
             return await ctx.send('The word cannot be more than 50 characters long.')
-      
+
          if any(len(x) < 2 for x in word['words']):
             return await ctx.send('The word must be atleast 2 characters long.')
 
@@ -285,7 +317,7 @@ class Highlight(commands.Cog):
                            extra = f'highlights for {channel}' if channel else 'guild highlights'
                       ))
 
-               if len(config) + len(word['words']) >= (limit := 10 if channel else 25):
+               if len(user_config) + len(word['words']) >= (limit := 10 if channel else 25):
                   return await ctx.reply('You have reached the maximum of `{limit}` highlights for this {type}.'.format(
                      limit = limit,
                      type = 'channel' if channel else 'guild'
@@ -296,7 +328,7 @@ class Highlight(commands.Cog):
                      'highlight': highlight, 
                      'channel': channel.id if channel else None, 
                      'type': word['type'],
-                     'setting': word['setting']
+                     'settings': word['settings']
                   }
                     for highlight in word['words']
                ]
@@ -310,7 +342,10 @@ class Highlight(commands.Cog):
       
       @highlight.command(name = 'remove', aliases = ['-'])
       async def highlight_remove(self, ctx: commands.Context, *, word: HighlightFlagResolver):
-         """Removes a word from your highlights."""
+         """Removes a word from your highlights.
+         
+
+         """
       
          channel = word['channel']
          config_method = self.config.channel(channel).highlights() if channel else self.config.guild(ctx.guild).highlights()
@@ -409,7 +444,7 @@ class Highlight(commands.Cog):
                    yml_data['CHANNEL'][channel.id] = [
                      {
                         highlight['highlight']: {
-                           'setting': highlight['setting'], 
+                           'settings': highlight['settings'], 
                            'type': highlight['type']
                         }
                      }
@@ -456,9 +491,9 @@ class Highlight(commands.Cog):
          This will replace the highlights of all the channels mentioned in `<channels_and_categories>` with those of the base channel.
          
          **Arguments:**
-          - `<base_channel>`: The channel to sync highlights from.
-          - `<channels_and_categories>`: The channels to sync highlights to, if a category is passed, highlights are synced with all the channels in that category. Including voice channels.
-          
+            - `<base_channel>`: The channel to sync highlights from.
+            - `<channels_and_categories>`: The channels to sync highlights to, if a category is passed, highlights are synced with all the channels in that category. Including voice channels.
+            
          """
          channels = [channel for channel in channels_and_categories if not isinstance(channel, discord.CategoryChannel)]
          for channel in channels_and_categories:
@@ -490,11 +525,9 @@ class Highlight(commands.Cog):
       async def highlight_clear(self, ctx: commands.Context):
          """Clears your highlights."""
 
-         # guild config
          async with self.config.guild(ctx.guild).highlights() as guild_highlights:
             guild_highlights[str(ctx.author.id)] = []
 
-         # channels
          channels = await self.config.all_channels()
          for channel, data in channels.items():
              if data.get('highlights', {}).get(str(ctx.author.id)):
@@ -531,7 +564,7 @@ class Highlight(commands.Cog):
 
          return await ctx.reply(embed = embed)
 
-      @highlight.group(name = 'settings', aliases = ['set'], auto_send_help = True, invoke_without_command = True)
+      @highlight.group(name = 'settings', aliases = ['set'], autohelp = True, invoke_without_command = True)
       async def highlight_set(self, ctx: commands.Context):
          """Settings for Highlight."""
 
@@ -541,43 +574,37 @@ class Highlight(commands.Cog):
 
          current = await self.config.member(ctx.author).cooldown()
          if rate is None:
-            return await ctx.reply(f'Your current cooldown is {humanize_timedelta(seconds = current)}.')
+            return await ctx.reply(f'Your current cooldown is **{humanize_timedelta(seconds = current)}**.')
          if rate > 600 or rate < 1:
             return await ctx.reply('Cooldown cannot be more than 10 minutes or less than 1 second.')
          await self.config.member(ctx.author).cooldown.set(rate)
          await ctx.reply(f'Alright, your cooldown is now {humanize_timedelta(seconds = rate)}.')
 
-      @highlight_set.command(name = 'onlyoffline', aliases = ['onlyoff'])
-      async def highlight_set_onlyoffline(self, ctx: commands.Context, yes_or_no: bool):
-         """Only get highlighted while you are `Offline`."""
-
-         current = await self.config.member(ctx.author).onlyoffline()
-         if current == yes_or_no:
-            return await ctx.reply(f'This is already {"enabled" if yes_or_no else "disabled"} for you....')
-         await self.config.member(ctx.author).onlyoffline.set(yes_or_no)
-         await ctx.reply(f'{"Enabled, you will now only get highlighted while you are `Offline`." if yes_or_no else "Disabled."}')
-
+      async def _toggle_settings(self, ctx: commands.Context, name: str):
+         yes_or_no = ctx.kwargs.get('yes_or_no')
+         async with self.config.member(ctx.author) as conf:
+            if yes_or_no == conf[name]:
+               return await ctx.reply(f'This is already {"enabled" if yes_or_no else "disabled"} for you....')
+            conf[name] = yes_or_no
+            return await ctx.reply(f'{"Enabled, " + f"you can now recieve highlights from {name}." if yes_or_no else "Disabled."}')
+            
       @highlight_set.command(name = 'bots')
       async def highlight_set_bots(self, ctx: commands.Context, yes_or_no: bool):
          """Recieve highlights from messages sent by bots.
-         
-         This also highlights you for embeds, images are ignored even if you have image highlights enabled.
          """
-         current = await self.config.member(ctx.author).bots()
-         if current == yes_or_no:
-            return await ctx.reply(f'This is already {"enabled" if yes_or_no else "disabled"} for you....')
-         await self.config.member(ctx.author).bots.set(yes_or_no)
-         await ctx.reply(f'{"Enabled, you can now recieve highlights from bots." if yes_or_no else "Disabled."}')
+         await self._toggle_settings(ctx, 'bots')
+
+      @highlight_set.command(name = 'embeds')
+      async def highlight_set_embeds(self, ctx: commands.Context, yes_or_no: bool):
+         """...
+         """
+         await self._toggle_settings(ctx, 'embeds')
 
       @highlight_set.command(name = 'images', aliases = ['files'])
       async def highlight_set_images(self, ctx: commands.Context, yes_or_no: bool):
-         """Get highlights from text in an image."""
-
-         current = await self.config.member(ctx.author).images()
-         if current == yes_or_no:
-            return await ctx.reply(f'This is already {"enabled" if yes_or_no else "disabled"} for you....')
-         await self.config.member(ctx.author).images.set(yes_or_no)
-         await ctx.reply(f'{"Enabled, you can now recieve highlights from images." if yes_or_no else "Disabled."}')
+         """Get highlights from text in an image.
+         """
+         await self._toggle_settings(ctx, 'images')
 
       @highlight_set.command(name = 'colour', aliases = ['color'])
       async def highlight_set_colour(self, ctx: commands.Context, *, colour: commands.ColourConverter):
@@ -594,9 +621,9 @@ class Highlight(commands.Cog):
          embed = discord.Embed(
             description = '\n'.join([
                f'Cooldown: {humanize_timedelta(seconds = (data["cooldown"]))}',
-               f'Only-Offline: {data["onlyoffline"]}',
-               f'Images (beta): {data["images"]}',
-               f'Bots: {data["bots"]}'
+               f'Bots: {data["bots"]}',
+               f'Embeds: {data["embeds"]}',
+               f'Images (beta): {data["images"]}'
             ]),
             colour = data['colour'],
             timestamp = datetime.datetime.utcnow()
@@ -612,19 +639,19 @@ class Highlight(commands.Cog):
       @commands.has_permissions(manage_guild = True)
       async def highlightset_roles(self, ctx: commands.Context, roles: commands.Greedy[discord.Role]):
            async with self.config.guild(ctx.guild).allowed_roles() as current:
-             for role in roles:
-                 if role.id in current:
-                    current.remove(role.id)
-                 elif role.id not in current:
-                    current.append(role.id)
-             if not current:
+               for role in roles:
+                  if role.id in current:
+                     current.remove(role.id)
+                  elif role.id not in current:
+                     current.append(role.id)
+           if not current:
                 return await ctx.reply('You do not have any allowed roles, everyone can use this cog.')
-             embed = discord.Embed(
-                description = '\n'.join([ctx.guild.get_role(role).mention for role in current]),
-                colour = discord.Colour.green(),
-                timestamp = datetime.datetime.utcnow()
-             ).set_author(
-                name = f'{ctx.guild.name}\'s Highlight roles',
-                icon_url = ctx.guild.icon.url
-             )
-             return await ctx.reply(embed = embed)
+           embed = discord.Embed(
+                  description = '\n'.join([ctx.guild.get_role(role).mention for role in current]),
+                  colour = discord.Colour.green(),
+                  timestamp = datetime.datetime.utcnow()
+               ).set_author(
+                  name = f'{ctx.guild.name}\'s Highlight roles',
+                  icon_url = ctx.guild.icon.url
+               )
+           return await ctx.reply(embed = embed)

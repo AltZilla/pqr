@@ -3,24 +3,25 @@ import argparse
 import re
 
 from fuzzywuzzy import process
-from redbot.core.commands import BadArgument, Converter, Context, GuildChannelConverter, ChannelNotFound
+from typing import Literal
+from redbot.core import commands
 
 
-class FuzzyChannels(Converter):
-    async def convert(self, ctx: Context, argument: str):
+class FuzzyChannels(commands.Converter):
+    async def convert(self, ctx: commands.Context, argument: str):
         try:
-            return await GuildChannelConverter().convert(ctx, argument)
+            return await commands.GuildChannelConverter().convert(ctx, argument)
         except Exception:
             channel, acc = process.extractOne(argument, [channel.name for channel in ctx.guild.channels])
             if acc < 60:
-                raise ChannelNotFound(argument)
+                raise commands.ChannelNotFound(argument)
             channel = discord.utils.get(ctx.guild.channels, name = channel)
             if isinstance(channel, discord.CategoryChannel):
-               raise BadArgument('The channel should be a Text channel or Voice channel, not a category.')
+               raise commands.BadArgument('The channel should be a Text channel or Voice channel, not a category.')
             return channel
 
-class TimeConverter(Converter):
-    async def convert(self, ctx: Context, argument: str):
+class TimeConverter(commands.Converter):
+    async def convert(self, ctx: commands.Context, argument: str):
        matches = re.findall(r'([0-9]+) *([a-zA-Z]+)', argument)
        seconds = 0
        for match in matches:
@@ -43,10 +44,10 @@ class TimeConverter(Converter):
 
 class NoExitParser(argparse.ArgumentParser):
     def error(self, message):
-        raise BadArgument(message)
+        raise commands.BadArgument(message)
 
-class HighlightFlagResolver(Converter):
-    async def convert(self, ctx: Context, argument):
+class HighlightFlagResolver(commands.Converter):
+    async def convert(self, ctx: commands.Context, argument):
         parser = NoExitParser(description = "Highlight flag resolver")
 
         parser.add_argument('words', nargs = '+', help = "Words to highlight")
@@ -56,8 +57,7 @@ class HighlightFlagResolver(Converter):
         parser.add_argument('--regex', '-r', dest = 'regex', action = 'store_true')
         parser.add_argument('--wildcard', '-w', dest = 'wildcard', action = 'store_true')
         # settings
-        parser.add_argument('--bots', '-b', dest = 'bots', action = 'store_true')
-        parser.add_argument('--images', '-i', dest = 'images', action = 'store_true')
+        parser.add_argument('--set', '-s', dest = 'settings', type = str, nargs = '+', default = ['default'], required = False)
 
         args = vars(parser.parse_args(argument.split()))
 
@@ -70,12 +70,6 @@ class HighlightFlagResolver(Converter):
 
         if args['multiple'] == False:
            args['words'] = [' '.join(args['words'])]
-
-        settings = [s for s in [args['bots'], args['images']] if s]
-        if len(settings) > 1:
-           raise BadArgument("You can only use one of the following flags: `bots`, `images`.")
-
-        args['setting'] = 'bots' if args['bots'] else 'images' if args['images'] else None
 
         args['words'] = list(set(map(lambda w: w.strip().lower(), args['words'])))
         
