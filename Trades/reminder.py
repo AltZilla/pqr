@@ -19,6 +19,12 @@ class Reminder:
         self._queue = asyncio.Queue()
 
         self._view = discord.ui.View(timeout = None)
+        self._view.add_item(
+            discord.ui.Button(label = 'Top.gg', style = discord.ButtonStyle.link, url = 'https://top.gg/servers/719180744311701505/vote')
+        )
+        self._view.add_item(
+            discord.ui.Button(label = 'dbl.com', style = discord.ButtonStyle.link, url = 'https://discordbotlist.com/servers/trades/upvote')
+        )
         button = discord.ui.Button(
             label = 'Toggle Reminders',
             emoji = '<:t_yallNeedJesus:934016516037423124>',
