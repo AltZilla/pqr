@@ -2,12 +2,12 @@ import discord
 
 from redbot.core import commands, Config
 from .reminder import Reminder
+from . import TRADES_GUILD_ID
 
 class Trades(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier = 719180744311701505)
-        
         self.config.register_guild(
             vote__role = None,
             vote__channel = None
@@ -17,9 +17,12 @@ class Trades(commands.Cog):
         )
         self._reminder = Reminder(self, interval = 60)
 
+    async def cog_check(self, ctx: commands.Context) -> bool:
+        return ctx.guild.id == TRADES_GUILD_ID
+
     @commands.Cog.listener('on_member_update')
-    async def vote_reminder(self, before: discord.Member, after: discord.Member):
-        if after.guild.id != 719180744311701505:
+    async def _vote_reminder_event(self, before: discord.Member, after: discord.Member):
+        if after.guild.id != TRADES_GUILD_ID or before.roles == after.roles:
            return
         if await self.config.member(after).vote.reminders() == False:
            return
@@ -30,7 +33,7 @@ class Trades(commands.Cog):
         if voter_role in before.roles and voter_role not in after.roles:
            self._reminder.remind(after)
 
-    @commands.group(name = 'votereminder', aliases = ['vm'], invoke_without_command = True)
+    @commands.group(name = 'votereminder', aliases = ['vrm'], invoke_without_command = True)
     async def _vote_reminder(self, ctx: commands.Context, on_or_off: bool):
         """Base command for Vote Reminders
 
@@ -44,7 +47,7 @@ class Trades(commands.Cog):
                ))
 
             conf['reminders'] = on_or_off
-        await ctx.tick(message = '{type} Vote Reminders for you.'.format(type = 'Enabled' if on_or_off else 'Disabled'))
+        await ctx.reply('{type} Vote Reminders for you.'.format(type = 'Enabled' if on_or_off else 'Disabled'))
 
     @_vote_reminder.command(name = 'role')
     @commands.admin_or_permissions(manage_guild = True)
