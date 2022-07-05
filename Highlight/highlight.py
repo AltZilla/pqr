@@ -6,7 +6,6 @@ import time
 import logging
 import datetime
 import yaml
-import unidecode
 import re
 
 from io import BytesIO
@@ -44,66 +43,66 @@ class Highlight(commands.Cog):
 
       def __init__(self, bot: commands.Bot):
           self.bot = bot
-          self.config = Config.get_conf(self, identifier = 1698497658475)
-          self.config.register_global(
-            min_cooldown = 30
-          )
-          self.config.register_guild(
-            highlights = {},
-            allowed_roles = []
-          )
-          self.config.register_channel(
-            highlights = {}
-          )
-          self.config.register_member(
-            blocks = [],
-            cooldown = 60,
-            bots = False,
-            embeds = False,
-            images = False,
-            colour = 3066993
-          )
+          self.config = Config.get_conf(self, identifier = 1698497658475, force_registration = True)
+          default_member = {
+              'blocks': [],
+              'cooldown': 60,
+              'bots': False,
+              'embeds': False,
+              'images': False,
+              'colour': discord.Colour.green().value
+          }
+          default_global = {
+              'min': {
+                 'cooldown': 30,
+                 'len': 3
+              },
+              'max': {
+                 'cooldown': 600,
+                 'len': 50
+              }
+          }
+          self.config.register_member(**default_member)
+          self.config.register_global(**default_global)
+          self.config.register_guild(highlights = {}, allowed_roles = [])
+          self.config.register_channel(highlights = {})
           self.last_seen = {}
-          self.cooldowns = {}
-      
-      __version__ = "1.1.0"
-      __author__ = "AltZilla"
-
-      def format_help_for_context(self, ctx: commands.Context):
-          pre_processed = super().format_help_for_context(ctx)
-          return f"{pre_processed}\nCog Version: {self.__version__}\nAuthor: {self.__author__}"
+          self.cooldowns = {} # TODO: Cache config
 
       async def get_matches(self, highlight_data: List[dict], *, message_data: dict, config: dict) -> Matches:
           matches = Matches()
-          string = message_data['message'].content
+          content = message_data['message'].content
           if config['bots']:
-             string += ' ' + message_data.get('bot_content', '')
+             string += ' ' + message_data.get('bots', '')
 
           if config['images']:
-             string += ' ' + message_data.get('attach_content', '')
+             string += ' ' + message_data.get('images', '')
 
           async def resolve(data: dict):
-              s = copy(string)
-              setting, type = (
-                 data['setting'],
-                 data['type']
-              )
-              if (not config['bots']) and (setting == 'bots') and (message_data['message'].author.bot):
-                 s += ' ' + message_data.get('bot_content', '')
-              if (not config['images']) and (setting == 'images'):
-                 s += ' ' + message_data.get('attach_content', '')
-              stemmed_string = ' '.join(stem(word) for word in s.split())
+              s = copy(content)
+
+              if (not config['bots']) and (data['setting'] == 'bots') and (message_data['message'].author.bot):
+                 s += ' ' + message_data.get('bots', '')
+              if (not config['images']) and (data['setting'] == 'images'):
+                 s += ' ' + message_data.get('images', '')
+              stemmed_content = ' '.join(stem(word) for word in s.split())
+
+              def wildcard():
+                  w = []
+                  for char in data['highlight']:
+                      w.append(f'[ _.{re.escape(char)}-]*')
+                  return ''.join(w)
 
               type_converter = {
                   'default': lambda: re.compile(rf'\b{re.escape(data["highlight"])}\b', re.IGNORECASE),
                   'regex': lambda: re.compile(data['highlight'], re.IGNORECASE),
-                  'wildcard': lambda: re.compile(r'\b[a-zA-Z0-9_\-.]{0,3}' + '[_\-. ]{0,3}'.join([re.escape(char) for char in unidecode.unidecode(data['highlight'])]) + r'[a-zA-Z0-9_\-.]{0,3}\b', re.IGNORECASE)
+                  'wildcard': wildcard
               }
             
-              pattern = type_converter.get(type)()
-              if match := pattern.search(string):
+              pattern = type_converter.get(data['type'])()
+              if match := pattern.search(s):
                   matches.add_match(match = match, highlight_data = data)
-              elif match := pattern.search(stemmed_string):
+              elif match := pattern.search(stemmed_content):
                   matches.add_match(match = match, highlight_data = data)
             
           await asyncio.gather(
@@ -133,7 +132,7 @@ class Highlight(commands.Cog):
                    texts.append(footer)
                 if (author := embed.author.name):
                    texts.append(author)
-            message_raw['bot_content'] = ' '.join(texts)
+            message_raw['bots'] = ' '.join(texts)
 
          if message.attachments and IMAGE_HIGHLIGHTS:
             texts = []
@@ -163,7 +162,7 @@ class Highlight(commands.Cog):
             except asyncio.TimeoutError:
                pass
             
-            message_raw['attach_content'] = ' '.join(texts)
+            message_raw['images'] = ' '.join(texts)
          
          return message_raw
                
@@ -181,7 +180,7 @@ class Highlight(commands.Cog):
          guild_highlights, channel_highlights, min_cd = (
             await self.config.guild(message.guild).highlights(),
             await self.config.channel(message.channel).highlights(),
-            await self.config.min_cooldown()
+            await self.config.min.cooldown()
          )
          guild_highlights.update(channel_highlights)
 
@@ -209,7 +208,6 @@ class Highlight(commands.Cog):
              data = await self.config.member(member).all()
              cooldown = data['cooldown'] if data['cooldown'] < min_cd else min_cd
              if (
-
                 (cd := self.cooldowns.get(message.guild.id, {}).get(member.id))
                 and cd >= (time.time() - cooldown)
              ): 
@@ -342,10 +340,7 @@ class Highlight(commands.Cog):
       
       @highlight.command(name = 'remove', aliases = ['-'])
       async def highlight_remove(self, ctx: commands.Context, *, word: HighlightFlagResolver):
-         """Removes a word from your highlights.
-         
-
-         """
+         """Removes a word from your highlights."""
       
          channel = word['channel']
          config_method = self.config.channel(channel).highlights() if channel else self.config.guild(ctx.guild).highlights()
@@ -429,8 +424,8 @@ class Highlight(commands.Cog):
             yml_data['GUILD'] = [
                {
                   highlight['highlight']: {
-                     'setting': highlight['setting'],
-                     'type': highlight['type']
+                     'setting': humanize_list(highlight.get('settings', [])),
+                     'type': highlight.get('type', 'default')
                   }
                   for highlight in guild
                }
@@ -444,8 +439,8 @@ class Highlight(commands.Cog):
                    yml_data['CHANNEL'][channel.id] = [
                      {
                         highlight['highlight']: {
-                           'settings': highlight['settings'], 
-                           'type': highlight['type']
+                           'settings': humanize_list(highlight.get('settings', [])), 
+                           'type': highlight.get('type')
                         }
                      }
                        for highlight in data

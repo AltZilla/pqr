@@ -16,8 +16,8 @@ class FuzzyChannels(commands.Converter):
             if acc < 60:
                 raise commands.ChannelNotFound(argument)
             channel = discord.utils.get(ctx.guild.channels, name = channel)
-            if isinstance(channel, discord.CategoryChannel):
-               raise commands.BadArgument('The channel should be a Text channel or Voice channel, not a category.')
+            if not isinstance(channel, discord.TextChannel) or not isinstance(channel, discord.VoiceChannel):
+               raise commands.BadArgument('The channel should be a Text channel or Voice channel.')
             return channel
 
 class TimeConverter(commands.Converter):
@@ -70,6 +70,14 @@ class HighlightFlagResolver(commands.Converter):
 
         if args['multiple'] == False:
            args['words'] = [' '.join(args['words'])]
+
+        if args['settings'] != ['default']:
+           for set in args['settings']:
+               if not set.lower() in ['bots', 'embeds', 'images']:
+                  args['settings'].remove(set)
+
+        if not args['settings']:
+           raise commands.BadArgument('Invalid Setting Types.')
 
         args['words'] = list(set(map(lambda w: w.strip().lower(), args['words'])))
         

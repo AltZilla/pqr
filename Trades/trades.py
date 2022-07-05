@@ -1,7 +1,9 @@
 import discord
 
 from redbot.core import commands, Config
+from typing import Literal, Optional, Union
 from .reminder import Reminder
+from .components import EmbedPeekView
 from . import TRADES_GUILD_ID
 
 class Trades(commands.Cog):
@@ -63,4 +65,27 @@ class Trades(commands.Cog):
         await self.config.guild(ctx.guild).vote.channel.set(channel.id)
         await ctx.reply(
             f'Set Reminder Channel to {channel.name}.'
+        )
+
+    @commands.command(name = 'embedpeek', usage = '[message_id] [channel] [start_field]')
+    @commands.mod_or_permissions(manage_messages = True)
+    async def _embedpeek(self, ctx: commands.Context, message_id: Optional[int], channel: Optional[Union[discord.TextChannel, discord.VoiceChannel]], start_field: Literal['author', 'title', 'description', 'fields', 'footer'] = 'description'):
+        """Displays a messages embeds content.
+        
+        This only shows you the first embed in the message.
+        You can also reply to the message you want to check.
+        """
+        try:
+           message = ctx.message.reference.resolved if ctx.message.reference else await (channel or ctx.channel).fetch_message(message_id)
+        except Exception:
+           return await ctx.send_help()
+        
+        if not message.embeds:
+           return await ctx.reply('That message has no embeds.')
+
+        embed = message.embeds[0].to_dict()
+        view = EmbedPeekView(ctx, embed)  
+        return await ctx.send(
+            content = await view._format(start_field),
+            view = view
         )
