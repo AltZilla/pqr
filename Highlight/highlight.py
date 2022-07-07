@@ -1,35 +1,20 @@
 import contextlib
-import aiohttp
 import discord
 import asyncio
 import time
 import logging
 import datetime
 import yaml
-import re
 
 from io import BytesIO
-from copy import copy
 from discord.ext import commands as dpy_commands
 from redbot.core import commands, Config
 from redbot.core.utils.chat_formatting import humanize_list, humanize_timedelta
 from redbot.core.utils.menus import start_adding_reactions
 from redbot.core.utils.predicates import ReactionPredicate
-from .helpers import HighlightView, Matches
+from .helpers import HighlightView, Matches, MessageRaw
 from .converters import HighlightFlagResolver, TimeConverter
-from stemming.porter2 import stem
 from typing import Union, List, Optional, Dict
-
-IMAGE_HIGHLIGHTS = True
-try:
-   import pytesseract
-   from PIL import Image
-except ImportError:
-   IMAGE_HIGHLIGHTS = False
-
-IMAGE_REGEX = re.compile(
-    r'(?:(?:https?):\/\/)?[\w\/\-?=%.]+\.(?:png|jpg|jpeg)+', flags = re.I
-)
 
 log = logging.getLogger('red.cogs.Highlight')
 
@@ -52,119 +37,17 @@ class Highlight(commands.Cog):
               'images': False,
               'colour': discord.Colour.green().value
           }
-          default_global = {
-              'min': {
-                 'cooldown': 30,
-                 'len': 3
-              },
-              'max': {
-                 'cooldown': 600,
-                 'len': 50
-              }
-          }
           self.config.register_member(**default_member)
-          self.config.register_global(**default_global)
+          self.config.register_global(
+              cooldown__min = 30,
+              cooldown__max = 600,
+              len__min = 2,
+              len__max = 50
+          )
           self.config.register_guild(highlights = {}, allowed_roles = [])
           self.config.register_channel(highlights = {})
           self.last_seen = {}
           self.cooldowns = {} # TODO: Cache config
-
-      async def get_matches(self, highlight_data: List[dict], *, message_data: dict, config: dict) -> Matches:
-          matches = Matches()
-          content = message_data['message'].content
-          if config['bots']:
-             string += ' ' + message_data.get('bots', '')
-
-          if config['images']:
-             string += ' ' + message_data.get('images', '')
-
-          async def resolve(data: dict):
-              s = copy(content)
-
-              if (not config['bots']) and (data['setting'] == 'bots') and (message_data['message'].author.bot):
-                 s += ' ' + message_data.get('bots', '')
-              if (not config['images']) and (data['setting'] == 'images'):
-                 s += ' ' + message_data.get('images', '')
-              stemmed_content = ' '.join(stem(word) for word in s.split())
-
-              def wildcard():
-                  w = []
-                  for char in data['highlight']:
-                      w.append(f'[ _.{re.escape(char)}-]*')
-                  return ''.join(w)
-
-              type_converter = {
-                  'default': lambda: re.compile(rf'\b{re.escape(data["highlight"])}\b', re.IGNORECASE),
-                  'regex': lambda: re.compile(data['highlight'], re.IGNORECASE),
-                  'wildcard': wildcard
-              }
-            
-              pattern = type_converter.get(data['type'])()
-              if match := pattern.search(s):
-                  matches.add_match(match = match, highlight_data = data)
-              elif match := pattern.search(stemmed_content):
-                  matches.add_match(match = match, highlight_data = data)
-            
-          await asyncio.gather(
-            *[resolve(data) for data in highlight_data]
-          )
-
-          return matches
-
-      async def get_message_raw(self, message: discord.Message):
-         message_raw = {
-            'message': message
-         }
-
-         if message.embeds:
-            texts = []
-            for embed in message.embeds:
-                if (title := embed.title):
-                   texts.append(title)
-                if (description := embed.description):
-                   texts.append(description)
-                for field in embed.fields:
-                   if (name := field.name):
-                      texts.append(name)
-                   if (value := field.value):
-                      texts.append(value)
-                if (footer := embed.footer.text):
-                   texts.append(footer)
-                if (author := embed.author.name):
-                   texts.append(author)
-            message_raw['bots'] = ' '.join(texts)
-
-         if message.attachments and IMAGE_HIGHLIGHTS:
-            texts = []
-
-            async def image_to_string(attachment: discord.Attachment = None, url: str = None):
-               if attachment:
-                  temp_ = BytesIO(await attachment.read())
-               elif url:
-                  temp_ = BytesIO()
-                  async with aiohttp.ClientSession() as session:
-                     async with session.get(url) as r:
-                        raw = await r.read()
-                        temp_.write(raw)
-                        temp_.seek(0)
-               result = pytesseract.image_to_string(Image.open(temp_), lang = 'eng')
-               texts.append(result)
-                  
-            tasks = []
-            for attach in message.attachments:
-                tasks.append(image_to_string(attachment = attach))
-
-            for url in IMAGE_REGEX.findall(message.content):
-                tasks.append(image_to_string(url = url))
-
-            try:
-               await asyncio.wait_for(asyncio.gather(*tasks), timeout = 10)
-            except asyncio.TimeoutError:
-               pass
-            
-            message_raw['images'] = ' '.join(texts)
-         
-         return message_raw
                
       @commands.Cog.listener('on_message')
       async def on_message(self, message: discord.Message):
@@ -180,11 +63,16 @@ class Highlight(commands.Cog):
          guild_highlights, channel_highlights, min_cd = (
             await self.config.guild(message.guild).highlights(),
             await self.config.channel(message.channel).highlights(),
-            await self.config.min.cooldown()
+            await self.config.cooldown.min()
          )
-         guild_highlights.update(channel_highlights)
 
-         message_data = await self.get_message_raw(message)
+         # merge guild and channel highlights
+         highlights = {}
+         for d in (guild_highlights, channel_highlights):
+             for member_id, hls in d.items():
+                 highlights.setdefault(member_id, []).extend(hls)
+
+         message_raw = await MessageRaw.from_message(message)
 
          history = [
                '**[<t:{timestamp}:T>] {author}:** {content} {attachments} {embeds}'.format(
@@ -201,12 +89,12 @@ class Highlight(commands.Cog):
          with contextlib.suppress(discord.NotFound): 
             async for msg in message.channel.history(limit = 4, before = message.created_at):
                 history.insert(0, f'[<t:{int(msg.created_at.timestamp())}:T>] **{msg.author}:** {msg.content[:200]}')
-         for member, highlight in guild_highlights.items():
+         for member, highlight in highlights.items():
              member = message.guild.get_member(int(member))
              if not member:
                 continue
              data = await self.config.member(member).all()
-             cooldown = data['cooldown'] if data['cooldown'] < min_cd else min_cd
+             cooldown = data['cooldown'] if data['cooldown'] > min_cd else min_cd
              if (
                 (cd := self.cooldowns.get(message.guild.id, {}).get(member.id))
                 and cd >= (time.time() - cooldown)
@@ -220,9 +108,7 @@ class Highlight(commands.Cog):
                 )
                 if lsc > (time.time() - 300) or len(filtered) > 2:
                    continue
-
-             matches = await self.get_matches(highlight_data = highlight, message_data = message_data, config = data)
-
+             matches = await Matches(data, highlight, message_raw).resolve()
              if not matches:
                 continue
              if (
@@ -235,17 +121,17 @@ class Highlight(commands.Cog):
              self.cooldowns.setdefault(message.guild.id, {})[member.id] = time.time()
 
              embed = discord.Embed(
-                title = matches.format_title(),
-                description = '\n'.join(history),
-                timestamp = message.created_at,
-                colour = data['colour']
+                  title = matches.format_title(),
+                  description = '\n'.join(history),
+                  timestamp = message.created_at,
+                  colour = data['colour']
              ).add_field(
-                name = 'Source Message',
-                value = f'[Jump To]({message.jump_url})'
+                  name = 'Source Message',
+                  value = f'[Jump To]({message.jump_url})'
              ).set_footer(
-                text = 'Triggered At'
+                  text = 'Triggered At'
              )
-
+             log.info(f'Sent highlight to member {member}.')
              await member.send(
                 content = f'In **{message.guild.name}** {message.channel.mention}, you were mentioned with the highlighted word{"s" if len(matches) > 1 else ""} {matches.format_response()}.',
                 embed = embed,
@@ -290,7 +176,7 @@ class Highlight(commands.Cog):
          **Flags:**
             > `--channel`: Add the word(s) to a specified channel's highlights, this defaults to the current channel.
             > `--multiple`: Add multiple words to your highlights at once.
-            > `--wildcard`: Tries to search for bypasses by either underscores, dots and or special characters while fetching matches.
+            > `--wildcard`: Attempts to search for bypasses fetching matches.
             > `--regex`: Add a Regular expression to your highlights. It is suggested you [learn regex](https://github.com/ziishaned/learn-regex) and [debug](https://regex101.com/) it first.
             > `--set <types...>`: Additional config for the added highlights. Valid Types: `bots`, `embeds` and `images`.
          """
@@ -541,9 +427,9 @@ class Highlight(commands.Cog):
             await self.config.member(ctx.author).all()
          )
          highlight_data = guild_highlights + channel_highlights
-         message_data = await self.get_message_data(ctx.message)
-         matches = await self.get_matches(highlight_data = highlight_data, message_data = message_data, config = member_config)
+         matches = await Matches(member_config, highlight_data).resolve(ctx.message)
          description = []
+         print(matches._matches)
          for d in highlight_data:
              if d['highlight'] in matches:
                 description.append('✅ ' + d['highlight'])

@@ -1,12 +1,104 @@
 import discord
+import aiohttp
+import asyncio
+import io
 import re
 
-from redbot.core.utils.chat_formatting import humanize_list
+from copy import copy
 from typing import List
+from redbot.core.utils.chat_formatting import humanize_list
+from stemming.porter2 import stem
+
+try:
+   import pytesseract
+   from PIL import Image
+except ImportError:
+   pytesseract = False
+
+IMAGE_REGEX = re.compile(
+    r'(?:(?:https?):\/\/)?[\w\/\-?=%.]+\.(?:png|jpg|jpeg)+', flags = re.I
+)
+
+class MessageRaw:
+    def __init__(self, message: discord.Message, bots: str, images: str):
+        self._message = message
+        self._bots = bots
+        self._images = images
+
+    def string_from_config(self, default_conf: dict, highlight_conf: dict):
+        content = copy(self._message.content)
+
+        if (default_conf.get('bots') or highlight_conf.get('bots')) and self._message.author.bot:
+           content += ' ' + self._bots
+
+        if highlight_conf.get('images') or highlight_conf.get('images'):
+           content += ' ' + self._images
+
+        return content
+        
+    @classmethod
+    async def from_message(cls, message: discord.Message):
+         message_raw = {
+            'message': message,
+            'bots': '',
+            'images': ''
+         }
+
+         if message.embeds:
+            texts = []
+            for embed in message.embeds:
+                for key, value in embed.to_dict().items():
+                    if key in ['type', 'color']:
+                       continue
+                    if isinstance(value, dict):
+                       for k, v in value.items():
+                           if not v.startswith('http'): # ignore links
+                              texts.append(v)
+                    elif isinstance(value, list):
+                       texts.extend(field['name'] + ' ' + field['value'] for field in value)
+                    else:
+                       texts.append(value)
+
+            message_raw['bots'] = ' '.join(texts)
+
+         if pytesseract != False:
+            texts = []
+
+            async def image_to_string(attachment: discord.Attachment = None, url: str = None):
+               if attachment:
+                  temp_ = io.BytesIO(await attachment.read())
+               elif url:
+                  temp_ = io.BytesIO()
+                  async with aiohttp.ClientSession() as session:
+                     async with session.get(url) as r:
+                        raw = await r.read()
+                        temp_.write(raw)
+                        temp_.seek(0)
+               result = pytesseract.image_to_string(Image.open(temp_), lang = 'eng')
+               texts.append(result)
+                  
+            tasks = []
+            for attach in message.attachments:
+                tasks.append(image_to_string(attachment = attach))
+
+            for url in IMAGE_REGEX.findall(message.content):
+                tasks.append(image_to_string(url = url))
+
+            try:
+               await asyncio.wait_for(asyncio.gather(*tasks), timeout = 10)
+            except asyncio.TimeoutError:
+               pass
+            
+            message_raw['images'] = ' '.join(texts)
+         
+         return cls(**message_raw)
 
 class Matches:
-    def __init__(self):
+    def __init__(self, conf: dict, highlights: dict, message_raw: MessageRaw = None):
         self._matches = []
+        self._conf = conf
+        self._highlights = highlights
+        self._message_raw = message_raw
 
     def __len__(self):
         return self._matches.__len__()
@@ -22,11 +114,32 @@ class Matches:
            highlight_data['match'] = match.group(0)
            self._matches.append(highlight_data)
 
-    def remove_match(self, match: re.Match, Highlight_data: dict):
+    def remove_match(self, match: str):
         for item in self._matches:
-            if item['match'] == match.group(0) and item['highlight'] == Highlight_data['highlight']:
-               self.matches.remove(item)
+            if item['match'] == match:
+               self._matches.remove(item)
 
+    async def resolve(self, message: discord.Message = None):
+        if not self._message_raw:
+           self._message_raw = await MessageRaw.from_message(message)
+
+        for data in self._highlights:
+              s = self._message_raw.string_from_config(default_conf = self._conf, highlight_conf = data)
+              stemmed_content = ' '.join(stem(word) for word in s.split())
+
+              type_converter = {
+                  'default': lambda: re.compile(rf'\b{re.escape(data["highlight"])}\b', re.IGNORECASE),
+                  'regex': lambda: re.compile(data['highlight']),
+                  'wildcard': lambda: re.compile(''.join([f'{char}[ _.{char}-]*' for char in s]), re.IGNORECASE)
+              }
+            
+              pattern = type_converter.get(data['type'])()
+              if match := pattern.search(s):
+                  self.add_match(match = match, highlight_data = data)
+              elif match := pattern.search(stemmed_content) and data['type'] == 'default':
+                  self.add_match(match = match, highlight_data = data)
+        return self
+        
     def format_response(self):
         response = []
         for item in self._matches:

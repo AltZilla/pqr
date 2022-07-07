@@ -3,7 +3,6 @@ import argparse
 import re
 
 from fuzzywuzzy import process
-from typing import Literal
 from redbot.core import commands
 
 
@@ -57,7 +56,7 @@ class HighlightFlagResolver(commands.Converter):
         parser.add_argument('--regex', '-r', dest = 'regex', action = 'store_true')
         parser.add_argument('--wildcard', '-w', dest = 'wildcard', action = 'store_true')
         # settings
-        parser.add_argument('--set', '-s', dest = 'settings', type = str, nargs = '+', default = ['default'], required = False)
+        parser.add_argument('--set', '-s', dest = 'settings', type = str, nargs = '+', default = [], required = False)
 
         args = vars(parser.parse_args(argument.split()))
 
@@ -71,13 +70,13 @@ class HighlightFlagResolver(commands.Converter):
         if args['multiple'] == False:
            args['words'] = [' '.join(args['words'])]
 
-        if args['settings'] != ['default']:
-           for set in args['settings']:
-               if not set.lower() in ['bots', 'embeds', 'images']:
+        if args['settings']:
+           for setting in args['settings']:
+               if not setting.lower() in ['bots', 'embeds', 'images']:
                   args['settings'].remove(set)
 
-        if not args['settings']:
-           raise commands.BadArgument('Invalid Setting Types.')
+           if not args['settings']:
+               raise commands.BadArgument('Invalid Setting Type.')
 
         args['words'] = list(set(map(lambda w: w.strip().lower(), args['words'])))
         

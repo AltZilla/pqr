@@ -72,8 +72,7 @@ class Trades(commands.Cog):
     async def _embedpeek(self, ctx: commands.Context, message_id: Optional[int], channel: Optional[Union[discord.TextChannel, discord.VoiceChannel]], start_field: Literal['author', 'title', 'description', 'fields', 'footer'] = 'description'):
         """Displays a messages embeds content.
         
-        This only shows you the first embed in the message.
-        You can also reply to the message you want to check.
+        This only shows you the first embed in the message, You can also reply to the message you want to check.
         """
         try:
            message = ctx.message.reference.resolved if ctx.message.reference else await (channel or ctx.channel).fetch_message(message_id)
