@@ -55,8 +55,8 @@ class MessageRaw:
                        continue
                     if isinstance(value, dict):
                        for k, v in value.items():
-                           if isinstance(v, str) and not v.startswith('http'): # ignore links
-                              texts.append(v)
+                           if not str(v).startswith('http'): # ignore links
+                              texts.append(str(v))
                     elif isinstance(value, list):
                        texts.extend(field['name'] + ' ' + field['value'] for field in value)
                     else:
