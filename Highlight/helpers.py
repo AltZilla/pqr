@@ -26,12 +26,15 @@ class MessageRaw:
         self._images = images
 
     def string_from_config(self, default_conf: dict, highlight_conf: dict):
-        content = copy(self._message.content)
+        content, settings = (
+           copy(self._message.content if not self._message.author.bot else ''),
+           highlight_conf.get('settings', [])
+        )
 
-        if (default_conf.get('bots') or highlight_conf.get('bots')) and self._message.author.bot:
-           content += ' ' + self._bots
+        if (default_conf.get('bots') or 'bots' in settings) and self._message.author.bot:
+           content += self._message.content + ' ' + self._bots
 
-        if highlight_conf.get('images') or highlight_conf.get('images'):
+        if default_conf.get('images') or 'images' in settings:
            content += ' ' + self._images
 
         return content
@@ -130,7 +133,7 @@ class Matches:
               type_converter = {
                   'default': lambda: re.compile(rf'\b{re.escape(data["highlight"])}\b', re.IGNORECASE),
                   'regex': lambda: re.compile(data['highlight']),
-                  'wildcard': lambda: re.compile(''.join([f'{char}[ _.{char}-]*' for char in s]), re.IGNORECASE)
+                  'wildcard': lambda: re.compile(''.join([f'{re.escape(char)}[ _.{re.escape(char)}-]*' for char in data['highlight']]), re.IGNORECASE)
               }
             
               pattern = type_converter.get(data['type'])()
@@ -139,17 +142,17 @@ class Matches:
               elif match := pattern.search(stemmed_content) and data['type'] == 'default':
                   self.add_match(match = match, highlight_data = data)
         return self
-        
+
     def format_response(self):
         response = []
         for item in self._matches:
             conversions = {
                 'default': lambda: f'\"{item["match"]}\"',
-                'wildcard': lambda: f'\"{item["match"]}\"' if item['match'].strip().lower() == item['highlight'].strip().lower() else f'\"{item["match"]}\" from wildcard `({item["highlight"]})`',
-                'regex': lambda: f'\"{item["match"]}\" from regex `({item["highlight"]})`'
+                'wildcard': lambda: f'\"{item["match" if len(item["match"]) < 100 else "[EXCEEDED 100 CHAR LIMIT]"]}\"' if item['match'].strip().lower() == item['highlight'].strip().lower() else f'\"{item["match"]}\" from wildcard `({item["highlight"]})`',
+                'regex': lambda: f'\"{item["match"] if len(item["match"]) < 100 else "[EXCEEDED 100 CHAR LIMIT]"}\" from regex `({item["highlight"]})`'
             }
             response.append(conversions.get(item['type'])())
-        return humanize_list(response)
+        return humanize_list(response[:10])
 
     def format_title(self):
         matches = [item['match'].strip() for item in self._matches]

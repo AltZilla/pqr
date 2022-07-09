@@ -1,4 +1,3 @@
-import contextlib
 import discord
 import asyncio
 import time
@@ -70,7 +69,7 @@ class Highlight(commands.Cog):
          highlights = {}
          for d in (guild_highlights, channel_highlights):
              for member_id, hls in d.items():
-                 highlights.setdefault(member_id, []).extend(hls)
+                 highlights.setdefault(int(member_id), []).extend(hls)
 
          message_raw = await MessageRaw.from_message(message)
 
@@ -84,13 +83,16 @@ class Highlight(commands.Cog):
                )
              ]
 
-         # sorted_history = sorted(filter(lambda m: m.channel == message.channel and m.created_at < message.created_at, self.bot.cached_messages), key = lambda m: m.created_at, reverse = True)
-         # history.extend([f'[<t:{int(msg.created_at.timestamp())}:T>] **{msg.author}:** {msg.content[:200]}' for msg in sorted_history][:4])
-         with contextlib.suppress(discord.NotFound): 
+         try: 
             async for msg in message.channel.history(limit = 4, before = message.created_at):
                 history.insert(0, f'[<t:{int(msg.created_at.timestamp())}:T>] **{msg.author}:** {msg.content[:200]}')
-         for member, highlight in highlights.items():
-             member = message.guild.get_member(int(member))
+         except (discord.Forbidden, AttributeError): # If its a voice channel, or we do can't view channel history, get history from cache instead.
+            sorted_history = sorted(filter(lambda m: m.channel == message.channel and m.created_at < message.created_at, self.bot.cached_messages), key = lambda m: m.created_at, reverse = True)
+            history.extend([f'[<t:{int(msg.created_at.timestamp())}:T>] **{msg.author}:** {msg.content[:200]}' for msg in sorted_history][:4])
+            history.reverse()
+
+         for member_id, highlight in highlights.items():
+             member = message.guild.get_member(member_id)
              if not member:
                 continue
              data = await self.config.member(member).all()
@@ -131,12 +133,17 @@ class Highlight(commands.Cog):
              ).set_footer(
                   text = 'Triggered At'
              )
-             log.info(f'Sent highlight to member {member}.')
-             await member.send(
-                content = f'In **{message.guild.name}** {message.channel.mention}, you were mentioned with the highlighted word{"s" if len(matches) > 1 else ""} {matches.format_response()}.',
-                embed = embed,
-                view =  HighlightView(message, [d['highlight'] for d in highlight])
-             )
+             try:
+                log.info(f'Sent Highlight to {member}, member was last highlighted at: {cd}')
+                await member.send(
+                     content = f'In **{message.guild.name}** {message.channel.mention}, you were mentioned with the highlighted word{"s" if len(matches) > 1 else ""} {matches.format_response()}.',
+                     embed = embed,
+                     view =  HighlightView(message, [d['highlight'] for d in highlight])
+                )
+             except discord.HTTPException:
+                pass
+             except Exception as e:
+                log.error(f'Failed to Highlight {member} [GUILD]: {message.guild.name}.', exc_info = e)
 
       @commands.Cog.listener('on_user_activity')
       async def on_user_activity(self, user: Union[discord.Member, discord.User], channel: discord.abc.Messageable):
@@ -180,7 +187,6 @@ class Highlight(commands.Cog):
             > `--regex`: Add a Regular expression to your highlights. It is suggested you [learn regex](https://github.com/ziishaned/learn-regex) and [debug](https://regex101.com/) it first.
             > `--set <types...>`: Additional config for the added highlights. Valid Types: `bots`, `embeds` and `images`.
          """
-
          if any(len(x) > 50 for x in word['words']):
             return await ctx.send('The word cannot be more than 50 characters long.')
 
@@ -310,7 +316,7 @@ class Highlight(commands.Cog):
             yml_data['GUILD'] = [
                {
                   highlight['highlight']: {
-                     'setting': humanize_list(highlight.get('settings', [])),
+                     'settings': humanize_list(highlight.get('settings', [])),
                      'type': highlight.get('type', 'default')
                   }
                   for highlight in guild
@@ -461,9 +467,8 @@ class Highlight(commands.Cog):
          await self.config.member(ctx.author).cooldown.set(rate)
          await ctx.reply(f'Alright, your cooldown is now {humanize_timedelta(seconds = rate)}.')
 
-      async def _toggle_settings(self, ctx: commands.Context, name: str):
-         yes_or_no = ctx.kwargs.get('yes_or_no')
-         async with self.config.member(ctx.author) as conf:
+      async def _toggle_settings(self, ctx: commands.Context, name: str, yes_or_no: bool):
+         async with self.config.member(ctx.author).all() as conf:
             if yes_or_no == conf[name]:
                return await ctx.reply(f'This is already {"enabled" if yes_or_no else "disabled"} for you....')
             conf[name] = yes_or_no
@@ -473,19 +478,22 @@ class Highlight(commands.Cog):
       async def highlight_set_bots(self, ctx: commands.Context, yes_or_no: bool):
          """Recieve highlights from messages sent by bots.
          """
-         await self._toggle_settings(ctx, 'bots')
+         await self._toggle_settings(ctx, 'bots', yes_or_no)
 
       @highlight_set.command(name = 'embeds')
       async def highlight_set_embeds(self, ctx: commands.Context, yes_or_no: bool):
-         """...
+         """Recieve highlights from embeds.
+
+         This checks every field except for `type` and `color`, urls are ignored.
+         This only really does smt when you have bot highlights enabled.
          """
-         await self._toggle_settings(ctx, 'embeds')
+         await self._toggle_settings(ctx, 'embeds', yes_or_no)
 
       @highlight_set.command(name = 'images', aliases = ['files'])
       async def highlight_set_images(self, ctx: commands.Context, yes_or_no: bool):
          """Get highlights from text in an image.
          """
-         await self._toggle_settings(ctx, 'images')
+         await self._toggle_settings(ctx, 'images', yes_or_no)
 
       @highlight_set.command(name = 'colour', aliases = ['color'])
       async def highlight_set_colour(self, ctx: commands.Context, *, colour: commands.ColourConverter):
