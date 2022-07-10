@@ -86,7 +86,7 @@ class Highlight(commands.Cog):
          try: 
             async for msg in message.channel.history(limit = 4, before = message.created_at):
                 history.insert(0, f'[<t:{int(msg.created_at.timestamp())}:T>] **{msg.author}:** {msg.content[:200]}')
-         except (discord.Forbidden, AttributeError): # If its a voice channel, or we do can't view channel history, get history from cache instead.
+         except (discord.NotFound, discord.Forbidden, AttributeError): # If its a voice channel, or we do can't view channel history, get history from cache instead.
             sorted_history = sorted(filter(lambda m: m.channel == message.channel and m.created_at < message.created_at, self.bot.cached_messages), key = lambda m: m.created_at, reverse = True)
             history.extend([f'[<t:{int(msg.created_at.timestamp())}:T>] **{msg.author}:** {msg.content[:200]}' for msg in sorted_history][:4])
             history.reverse()

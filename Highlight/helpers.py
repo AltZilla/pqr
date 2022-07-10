@@ -1,6 +1,7 @@
 import discord
 import aiohttp
 import asyncio
+import functools
 import io
 import re
 
@@ -77,21 +78,19 @@ class MessageRaw:
                         raw = await r.read()
                         temp_.write(raw)
                         temp_.seek(0)
-               result = pytesseract.image_to_string(Image.open(temp_), lang = 'eng')
-               texts.append(result)
+               partial = functools.partial(pytesseract.image_to_string, Image.open(temp_), lang = 'eng')
+               result = asyncio.get_event_loop().run_in_executor(None, partial)
+               try:
+                  texts.append(await asyncio.wait_for(result, timeout = 10))
+               except asyncio.TimeoutError:
+                  pass
                   
-            tasks = []
             for attach in message.attachments:
-                tasks.append(image_to_string(attachment = attach))
+                await image_to_string(attachment = attach)
 
             for url in IMAGE_REGEX.findall(message.content):
-                tasks.append(image_to_string(url = url))
+                await image_to_string(url = url)
 
-            try:
-               await asyncio.wait_for(asyncio.gather(*tasks), timeout = 10)
-            except asyncio.TimeoutError:
-               pass
-            
             message_raw['images'] = ' '.join(texts)
          
          return cls(**message_raw)
@@ -139,7 +138,7 @@ class Matches:
               pattern = type_converter.get(data['type'])()
               if match := pattern.search(s):
                   self.add_match(match = match, highlight_data = data)
-              elif match := pattern.search(stemmed_content) and data['type'] == 'default':
+              elif (match := pattern.search(stemmed_content)) and data['type'] == 'default':
                   self.add_match(match = match, highlight_data = data)
         return self
 
