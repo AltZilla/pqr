@@ -81,8 +81,8 @@ class MessageRaw:
                partial = functools.partial(pytesseract.image_to_string, Image.open(temp_), lang = 'eng')
                result = asyncio.get_event_loop().run_in_executor(None, partial)
                try:
-                  texts.append(await asyncio.wait_for(result, timeout = 10))
-               except asyncio.TimeoutError:
+                  texts.append(await asyncio.wait_for(result, timeout = 6))
+               except Exception as e:
                   pass
                   
             for attach in message.attachments:
