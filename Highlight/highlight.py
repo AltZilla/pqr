@@ -1,9 +1,9 @@
+import json
 import discord
 import asyncio
 import time
 import logging
 import datetime
-import yaml
 
 from io import BytesIO
 from discord.ext import commands as dpy_commands
@@ -306,51 +306,21 @@ class Highlight(commands.Cog):
          return await ctx.reply(embed = embed)
 
       @highlight.command(name = 'show', aliases = ['list', 'display'])
-      async def highlight_show(self, ctx: commands.Context, channel: Optional[Union[discord.TextChannel, discord.VoiceChannel]], show_all: Optional[bool]):
+      async def highlight_show(self, ctx: commands.Context, channel: Optional[Union[discord.TextChannel, discord.VoiceChannel]]):
          """Shows your current highlights."""
 
          member_config = await self.config.member(ctx.author).all()
-         if show_all:
-            yml_data = {'GUILD': {}, 'CHANNEL': {}}
-            guild = (await self.config.guild(ctx.guild).highlights()).get(str(ctx.author.id), [])
-            yml_data['GUILD'] = [
-               {
-                  highlight['highlight']: {
-                     'settings': humanize_list(highlight.get('settings', [])),
-                     'type': highlight.get('type', 'default')
-                  }
-                  for highlight in guild
-               }
-            ]
-            channels = await self.config.all_channels()
-            for channel_id, data in channels.items():
-                if not (data := data.get('highlights', {}).get(str(ctx.author.id))):
-                   continue
-                channel = ctx.guild.get_channel(channel_id)
-                if channel:
-                   yml_data['CHANNEL'][channel.id] = [
-                     {
-                        highlight['highlight']: {
-                           'settings': humanize_list(highlight.get('settings', [])), 
-                           'type': highlight.get('type')
-                        }
-                     }
-                       for highlight in data
-                   ]
-            fp = BytesIO(yaml.dump(yml_data).encode('utf-8'))
-            await ctx.author.send(file = discord.File(fp, 'highlights.yaml'))
-            return await ctx.send('I\'ve sent you a file via DM.')
          if channel:
             current = (await self.config.channel(channel).highlights()).get(str(ctx.author.id), [])
             if not current:
-               return await ctx.reply('You are not currently tracking anything.')  
+               return await ctx.reply('You are not currently tracking anything.')
 
             embed = discord.Embed(
                title = f'Your current highlights for #{channel.name}',
                description = '\n'.join(c['highlight'] for c in current),
                timestamp = datetime.datetime.utcnow(),
                colour = member_config.get('colour', 0x00ff00)
-            )    
+            )
             return await ctx.reply(embed = embed)
          current = (await self.config.guild(ctx.guild).highlights()).get(str(ctx.author.id), [])
          if not current:
@@ -382,6 +352,9 @@ class Highlight(commands.Cog):
             - `<channels_and_categories>`: The channels to sync highlights to, if a category is passed, highlights are synced with all the channels in that category. Including voice channels.
             
          """
+         return await ctx.reply(
+            'This command has been disabled temprarily.'
+         )
          channels = [channel for channel in channels_and_categories if not isinstance(channel, discord.CategoryChannel)]
          for channel in channels_and_categories:
              if isinstance(channel, discord.CategoryChannel):
@@ -412,16 +385,35 @@ class Highlight(commands.Cog):
       async def highlight_clear(self, ctx: commands.Context):
          """Clears your highlights."""
 
+         confirm_message = await ctx.send('Are you sure you want to clear your highlights? This removes all your guild & channel highlights and cannot be reverted.')
+         start_adding_reactions(confirm_message, ReactionPredicate.YES_OR_NO_EMOJIS)
+
+         pred = ReactionPredicate.yes_or_no(confirm_message, ctx.author)
+         try:
+            await self.bot.wait_for('reaction_add', check = pred, timeout = 30.0)
+            asyncio.create_task(
+               confirm_message.clear_reactions()
+            )
+         except asyncio.TimeoutError:
+            return await confirm_message('Operation cancelled.')
+         
+         if not pred.result is True:
+            return await confirm_message.edit('Operation cancelled.')
+
+         deleted_count = 0
          async with self.config.guild(ctx.guild).highlights() as guild_highlights:
-            guild_highlights[str(ctx.author.id)] = []
+            if h := guild_highlights.get(str(ctx.author.id)):
+               del guild_highlights[str(ctx.author.id)]
+               deleted_count += len(h)
 
          channels = await self.config.all_channels()
          for channel, data in channels.items():
-             if data.get('highlights', {}).get(str(ctx.author.id)):
+             if h := data.get('highlights', {}).get(str(ctx.author.id)):
                 async with self.config.channel_from_id(channel).highlights() as channel_highlights:
-                    channel_highlights[str(ctx.author.id)] = []
+                    del channel_highlights[str(ctx.author.id)]
+                    deleted_count += len(h)
 
-         await ctx.reply('Cleared your highlights.')
+         await confirm_message.edit(f'A total of **{deleted_count}** highlights were deleted.')
 
       @highlight.command(name = 'matches')
       async def highlight_matches(self, ctx: commands.Context, *, string: str):
@@ -435,7 +427,6 @@ class Highlight(commands.Cog):
          highlight_data = guild_highlights + channel_highlights
          matches = await Matches(member_config, highlight_data).resolve(ctx.message)
          description = []
-         print(matches._matches)
          for d in highlight_data:
              if d['highlight'] in matches:
                 description.append('✅ ' + d['highlight'])
@@ -450,6 +441,19 @@ class Highlight(commands.Cog):
          ).set_footer(text = f'{len(matches)} matches')
 
          return await ctx.reply(embed = embed)
+
+      @highlight.command(name = 'export')
+      async def highlight_export(self, ctx: commands.Context):
+         """Export your highlights to a JSON file.
+         """
+         highlights = ( await self.config.guild(ctx.guild).highlights() ).get(str(ctx.author.id), [])
+
+         for channel_id, highlight in (await self.config.all_channels()).items():
+             if ctx.guild.get_channel(channel_id):
+                highlights.extend(highlight['highlights'].get(str(ctx.author.id), []))
+
+         _file = BytesIO(json.dumps(highlights, indent = 3).encode())
+         await ctx.send(file = discord.File(_file, 'highlights.json'))
 
       @highlight.group(name = 'settings', aliases = ['set'], autohelp = True, invoke_without_command = True)
       async def highlight_set(self, ctx: commands.Context):

@@ -12,7 +12,7 @@ from stemming.porter2 import stem
 
 try:
    import pytesseract
-   from PIL import Image
+   from PIL import Image, UnidentifiedImageError
 except ImportError:
    pytesseract = False
 
@@ -78,13 +78,18 @@ class MessageRaw:
                         raw = await r.read()
                         temp_.write(raw)
                         temp_.seek(0)
-               partial = functools.partial(pytesseract.image_to_string, Image.open(temp_), lang = 'eng')
-               result = asyncio.get_event_loop().run_in_executor(None, partial)
+
                try:
-                  texts.append(await asyncio.wait_for(result, timeout = 6))
-               except Exception as e:
+                  im = Image.open(temp_)
+                  partial = functools.partial(pytesseract.image_to_string, im, lang = 'eng')
+                  texts.append(await asyncio.wait_for(asyncio.get_event_loop().run_in_executor(None, partial), timeout = 3))
+               except UnidentifiedImageError:
+                  return
+               except Exception:
                   pass
-                  
+               temp_.close()
+               im.close()
+
             for attach in message.attachments:
                 await image_to_string(attachment = attach)
 
