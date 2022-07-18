@@ -241,7 +241,7 @@ class Highlight(commands.Cog):
             user_config = config.get(str(ctx.author.id), [])
             if not user_config:
                return await ctx.send('You have no highlights added.')
-            
+
             not_highlighted = [w for w in word['words'] if not any(d['highlight'] == w for d in user_config)]
             if not_highlighted:
                return await ctx.send('{formatted} is not highlighted for you.'.format(

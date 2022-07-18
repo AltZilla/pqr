@@ -51,7 +51,6 @@ class HighlightFlagResolver(commands.Converter):
 
         parser.add_argument('words', nargs = '+', help = "Words to highlight")
         parser.add_argument('--multiple', '-m', dest = 'multiple', action = 'store_true')
-        parser.add_argument('--channel', '-c', dest = 'channel', type = str, nargs = '*', default = None, required = False)
         # types
         parser.add_argument('--regex', '-r', dest = 'regex', action = 'store_true')
         parser.add_argument('--wildcard', '-w', dest = 'wildcard', action = 'store_true')
@@ -59,13 +58,6 @@ class HighlightFlagResolver(commands.Converter):
         parser.add_argument('--set', '-s', dest = 'settings', type = str, nargs = '+', default = [], required = False)
 
         args = vars(parser.parse_args(argument.split()))
-
-        if args['channel']:
-           channel = await FuzzyChannels().convert(ctx, ' '.join(args['channel']))
-           args['channel'] = channel if channel else None
-
-        elif (not args['channel']) and any(f in argument for f in ['--channel', '-c']):
-           args['channel'] = ctx.channel
 
         if args['multiple'] == False:
            args['words'] = [' '.join(args['words'])]

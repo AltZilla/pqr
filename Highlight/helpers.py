@@ -4,6 +4,7 @@ import asyncio
 import functools
 import io
 import re
+import sys
 
 from copy import copy
 from typing import List
@@ -70,6 +71,8 @@ class MessageRaw:
 
             async def image_to_string(attachment: discord.Attachment = None, url: str = None):
                if attachment:
+                  if not any(attachment.filename.endswith(file_type) for file_type in ['.jpg', '.jpeg', '.png', '.webp']):
+                     return
                   temp_ = io.BytesIO(await attachment.read())
                elif url:
                   temp_ = io.BytesIO()
@@ -79,6 +82,8 @@ class MessageRaw:
                         temp_.write(raw)
                         temp_.seek(0)
 
+               if sys.getsizeof(temp_) > (500 * 1000): # 500 KB limit
+                  return temp_.close()
                try:
                   im = Image.open(temp_)
                   partial = functools.partial(pytesseract.image_to_string, im, lang = 'eng')
