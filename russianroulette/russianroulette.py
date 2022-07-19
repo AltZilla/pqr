@@ -2,6 +2,8 @@
 import asyncio
 import itertools
 import random
+import time
+import typing
 import discord
 import contextlib
 
@@ -18,16 +20,18 @@ __author__ = "Redjumpman"
 
 
 class RussianRoulette(commands.Cog):
-    defaults = {
-        "Cost": 50,
-        "Chamber_Size": 6,
-        "Wait_Time": 60,
-        "Session": {"Pot": 0, "Players": [], "Active": False},
-    }
 
-    def __init__(self):
+    def __init__(self, bot):
+        self.bot = bot
         self.config = Config.get_conf(self, 5074395004, force_registration=True)
-        self.config.register_guild(**self.defaults)
+        default_guild = {
+            "cost": 0,
+            "chamber_size": 25,
+            "wait_time": 60,
+            "emoji": "🩸"
+        }
+        self.config.register_guild(**default_guild)
+        self.cache = {}
 
     async def red_delete_data_for_user(self, **kwargs):
         """Nothing to delete."""
@@ -46,21 +50,40 @@ class RussianRoulette(commands.Cog):
         maximum number of players will be 6.
         """
         settings = await self.config.guild(ctx.guild).all()
-        if await self.game_checks(ctx, settings):
-            await self.add_player(ctx, settings["Cost"])
+        await self._check_and_add(ctx, settings)
+        session = self.cache[ctx.channel.id]
+
+        if len(session['players']) == 1:
+            message = await ctx.send(
+                "{0.author.mention} is gathering players for a game of russian "
+                "roulette!\nReact with {1} to enter! "
+                "The round will start <t:{2}:R> or when max players are reached.".format(ctx, settings['emoji'], int(time.time() + settings['wait_time']))
+            )
+            await message.add_reaction(settings['emoji'])
+
+            async def collect_players():
+                while len(self.cache[ctx.channel.id]['players']) < settings['chamber_size']:
+                    reaction, user = await self.bot.wait_for('reaction_add', check = lambda r, u: r.message.id == message.id and r.emoji == settings['emoji'] and not u.bot)
+                    await self._check_and_add(ctx, settings, user)
+            task = asyncio.create_task(
+                collect_players()
+            )
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(task, timeout = settings['wait_time'])
+                await ctx.send('Max players reached... starting.')
+
+            await self.start_game(ctx)
+
 
     @commands.guild_only()
     @checks.admin_or_permissions(administrator=True)
     @commands.command(hidden=True)
-    async def rusreset(self, ctx):
+    async def rusreset(self, ctx, channel: typing.Optional[discord.TextChannel]):
         """ONLY USE THIS FOR DEBUGGING PURPOSES"""
-        await self.config.guild(ctx.guild).Session.clear()
-        await ctx.send("The Russian Roulette session on this server has been cleared.")
-
-    @commands.command()
-    async def russianversion(self, ctx):
-        """Shows the cog version for RussianRoulette."""
-        await ctx.send("You are using russian roulette version {}".format(__version__))
+        channel = channel or ctx.channel
+        with contextlib.suppress(KeyError):
+           del self.cache[channel.id]
+        await ctx.send(f"The Russian Roulette session for {channel.mention} has been cleared.")
 
     @commands.group(autohelp=True)
     @commands.guild_only()
@@ -74,7 +97,7 @@ class RussianRoulette(commands.Cog):
         """Sets the chamber size of the gun used. MAX: 12."""
         if not 1 < size <= 12:
             return await ctx.send("Invalid chamber size. Must be in the range of 2 - 12.")
-        await self.config.guild(ctx.guild).Chamber_Size.set(size)
+        await self.config.guild(ctx.guild).chamber_size.set(size)
         await ctx.send("Chamber size set to {}.".format(size))
 
     @setrussian.command()
@@ -82,7 +105,7 @@ class RussianRoulette(commands.Cog):
         """Sets the required cost to play."""
         if amount < 0:
             return await ctx.send("You are an idiot.")
-        await self.config.guild(ctx.guild).Cost.set(amount)
+        await self.config.guild(ctx.guild).cost.set(amount)
         currency = await bank.get_currency_name(ctx.guild)
         await ctx.send("Required cost to play set to {} {}.".format(amount, currency))
 
@@ -91,65 +114,47 @@ class RussianRoulette(commands.Cog):
         """Set the wait time (seconds) before starting the game."""
         if seconds <= 0:
             return await ctx.send("You are an idiot.")
-        await self.config.guild(ctx.guild).Wait_Time.set(seconds)
+        await self.config.guild(ctx.guild).wait_time.set(seconds)
         await ctx.send("The time before a roulette game starts is now {} seconds.".format(seconds))
 
-    async def game_checks(self, ctx, settings):
-        if settings["Session"]["Active"]:
+    async def _check_and_add(self, ctx, settings, author = None):
+        author = author or ctx.author
+        session = self.cache.setdefault(ctx.channel.id, {'pot': settings['cost'], 'players': [], 'active': False})
+        if session["active"]:
             with contextlib.suppress(discord.Forbidden):
-                await ctx.author.send("You cannot join or start a game of russian roulette while one is active.")
-            return False
+                return await author.send("You cannot join or start a game of russian roulette while one is active.") 
 
-        if ctx.author.id in settings["Session"]["Players"]:
-            await ctx.send("You are already in the roulette circle.")
-            return False
+        elif author.id in session["players"]:
+            return await ctx.send("You are already in the roulette circle.") 
 
-        if len(settings["Session"]["Players"]) == settings["Chamber_Size"]:
-            await ctx.send("The roulette circle is full. Wait for this game to finish to join.")
-            return False
+        elif len(session["players"]) >= settings["chamber_size"]:
+            return await ctx.send("The roulette circle is full. Wait for this game to finish to join.")
 
         try:
-            await bank.withdraw_credits(ctx.author, settings["Cost"])
+            await bank.withdraw_credits(author, settings["cost"])
         except ValueError:
             currency = await bank.get_currency_name(ctx.guild)
-            await ctx.send("Insufficient funds! This game requires {} {}.".format(settings["Cost"], currency))
-            return False
-        else:
-            return True
+            return await ctx.send("Insufficient funds! This game requires {} {}.".format(settings["cost"], currency))
 
-    async def add_player(self, ctx, cost):
-        current_pot = await self.config.guild(ctx.guild).Session.Pot()
-        await self.config.guild(ctx.guild).Session.Pot.set(value=(current_pot + cost))
+        self.cache[ctx.channel.id]['pot'] += settings['cost']
+        self.cache[ctx.channel.id]['players'].append(author.id)
 
-        async with self.config.guild(ctx.guild).Session.Players() as players:
-            players.append(ctx.author.id)
-            num_players = len(players)
-
-        if num_players == 1:
-            wait = await self.config.guild(ctx.guild).Wait_Time()
-            await ctx.send(
-                "{0.author.mention} is gathering players for a game of russian "
-                "roulette!\nType `{0.prefix}russian` to enter. "
-                "The round will start in {1} seconds.".format(ctx, wait)
-            )
-            await asyncio.sleep(wait)
-            await self.start_game(ctx)
-        else:
-            await ctx.send("{} was added to the roulette circle.".format(ctx.author.mention))
+        if len(session['players']) > 1:
+           await ctx.send('{0}, was added to the roulette circle.'.format(author.mention))
 
     async def start_game(self, ctx):
-        await self.config.guild(ctx.guild).Session.Active.set(True)
-        data = await self.config.guild(ctx.guild).Session.all()
-        players = [ctx.guild.get_member(player) for player in data["Players"]]
+        session = self.cache.get(ctx.channel.id)
+        session['active'] = True
+        players = [ctx.guild.get_member(player) for player in session["players"]]
         filtered_players = [player for player in players if isinstance(player, discord.Member)]
         if len(filtered_players) < 2:
             try:
-                await bank.deposit_credits(ctx.author, data["Pot"])
+                await bank.deposit_credits(ctx.author, session["pot"])
             except BalanceTooHigh as e:
                 await bank.set_balance(ctx.author, e.max_balance)
             await self.reset_game(ctx)
             return await ctx.send("You can't play by youself. That's just suicide.\nGame reset and cost refunded.")
-        chamber = await self.config.guild(ctx.guild).Chamber_Size()
+        chamber = await self.config.guild(ctx.guild).chamber_size()
 
         counter = 1
         while len(filtered_players) > 1:
@@ -164,7 +169,7 @@ class RussianRoulette(commands.Cog):
         await self.game_teardown(ctx, filtered_players)
 
     async def start_round(self, ctx, chamber, players):
-        position = random.randint(1, chamber)
+        position = random.randint(1, random.randint(len(players), chamber))
         while True:
             for turn, player in enumerate(itertools.cycle(players), 1):
                 await ctx.send(
@@ -186,7 +191,7 @@ class RussianRoulette(commands.Cog):
     async def game_teardown(self, ctx, players):
         winner = players[0]
         currency = await bank.get_currency_name(ctx.guild)
-        total = await self.config.guild(ctx.guild).Session.Pot()
+        total = self.cache[ctx.channel.id]['pot']
         try:
             await bank.deposit_credits(winner, total)
         except BalanceTooHigh as e:
@@ -198,4 +203,5 @@ class RussianRoulette(commands.Cog):
         await self.reset_game(ctx)
 
     async def reset_game(self, ctx):
-        await self.config.guild(ctx.guild).Session.clear()
+        with contextlib.suppress(KeyError):
+           del self.cache[ctx.channel.id]

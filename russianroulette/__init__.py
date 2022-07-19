@@ -4,4 +4,4 @@ __red_end_user_data_statement__ = "This cog stores Discord IDs as needed for ope
 
 
 async def setup(bot):
-    await bot.add_cog(RussianRoulette())
+    await bot.add_cog(RussianRoulette(bot = bot))
