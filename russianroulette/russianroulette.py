@@ -26,7 +26,7 @@ class RussianRoulette(commands.Cog):
         self.config = Config.get_conf(self, 5074395004, force_registration=True)
         default_guild = {
             "cost": 0,
-            "chamber_size": 25,
+            "chamber_size": 12,
             "wait_time": 60,
             "emoji": "🩸"
         }
@@ -53,7 +53,8 @@ class RussianRoulette(commands.Cog):
         await self._check_and_add(ctx, settings)
         session = self.cache[ctx.channel.id]
 
-        if len(session['players']) == 1:
+        if not session['waiting']:
+            session['waiting'] = True
             message = await ctx.send(
                 "{0.author.mention} is gathering players for a game of russian "
                 "roulette!\nReact with {1} to enter! "
@@ -118,29 +119,32 @@ class RussianRoulette(commands.Cog):
         await ctx.send("The time before a roulette game starts is now {} seconds.".format(seconds))
 
     async def _check_and_add(self, ctx, settings, author = None):
-        author = author or ctx.author
-        session = self.cache.setdefault(ctx.channel.id, {'pot': settings['cost'], 'players': [], 'active': False})
+        user = author or ctx.author
+        session = self.cache.setdefault(ctx.channel.id, {'pot': settings['cost'], 'players': [], 'active': False, 'waiting': False})
+
         if session["active"]:
             with contextlib.suppress(discord.Forbidden):
-                return await author.send("You cannot join or start a game of russian roulette while one is active.") 
+                return await user.send("You cannot join or start a game of russian roulette while one is active.") 
 
-        elif author.id in session["players"]:
-            return await ctx.send("You are already in the roulette circle.") 
+        elif user.id in session["players"]:
+            return await ctx.send("You are already in the roulette circle.") if not author else None
 
         elif len(session["players"]) >= settings["chamber_size"]:
-            return await ctx.send("The roulette circle is full. Wait for this game to finish to join.")
+            return await ctx.send("The roulette circle is full. Wait for this game to finish to join.") if not author else None
 
         try:
-            await bank.withdraw_credits(author, settings["cost"])
+            await bank.withdraw_credits(user, settings["cost"])
         except ValueError:
             currency = await bank.get_currency_name(ctx.guild)
-            return await ctx.send("Insufficient funds! This game requires {} {}.".format(settings["cost"], currency))
+            with contextlib.suppress(discord.Forbidden):
+               await user.send("Insufficient funds! This game requires {} {}.".format(settings["cost"], currency)) if not author else None
+            return
 
         self.cache[ctx.channel.id]['pot'] += settings['cost']
-        self.cache[ctx.channel.id]['players'].append(author.id)
+        self.cache[ctx.channel.id]['players'].append(user.id)
 
         if len(session['players']) > 1:
-           await ctx.send('{0}, was added to the roulette circle.'.format(author.mention))
+           await ctx.send('{0}, was added to the roulette circle.'.format(user.mention))
 
     async def start_game(self, ctx):
         session = self.cache.get(ctx.channel.id)
