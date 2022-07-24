@@ -45,7 +45,10 @@ class NoExitParser(argparse.ArgumentParser):
     def error(self, message):
         raise commands.BadArgument(message)
 
-class HighlightFlagResolver(commands.Converter):
+class HighlightFlagResolver(commands.Converter, NoExitParser):
+    def __init__(self):
+        super(NoExitParser).__init__(description = "Highlight flag resolver")
+
     async def convert(self, ctx: commands.Context, argument):
         parser = NoExitParser(description = "Highlight flag resolver")
 

@@ -11,21 +11,10 @@ from typing import List
 from redbot.core.utils.chat_formatting import humanize_list
 from stemming.porter2 import stem
 
-try:
-   import pytesseract
-   from PIL import Image, UnidentifiedImageError
-except ImportError:
-   pytesseract = False
-
-IMAGE_REGEX = re.compile(
-    r'(?:(?:https?):\/\/)?[\w\/\-?=%.]+\.(?:png|jpg|jpeg)+', flags = re.I
-)
-
 class MessageRaw:
-    def __init__(self, message: discord.Message, bots: str, images: str):
+    def __init__(self, message: discord.Message, bots: str):
         self._message = message
         self._bots = bots
-        self._images = images
 
     def string_from_config(self, default_conf: dict, highlight_conf: dict):
         content, settings = (
@@ -36,17 +25,13 @@ class MessageRaw:
         if (default_conf.get('bots') or 'bots' in settings) and self._message.author.bot:
            content += self._message.content + ' ' + self._bots
 
-        if default_conf.get('images') or 'images' in settings:
-           content += ' ' + self._images
-
         return content
         
     @classmethod
     async def from_message(cls, message: discord.Message):
          message_raw = {
             'message': message,
-            'bots': '',
-            'images': ''
+            'bots': ''
          }
 
          if message.embeds:
@@ -65,43 +50,6 @@ class MessageRaw:
                        texts.append(value)
 
             message_raw['bots'] = ' '.join(texts)
-
-         if pytesseract != False:
-            texts = []
-
-            async def image_to_string(attachment: discord.Attachment = None, url: str = None):
-               if attachment:
-                  if not any(attachment.filename.endswith(file_type) for file_type in ['.jpg', '.jpeg', '.png', '.webp']):
-                     return
-                  temp_ = io.BytesIO(await attachment.read())
-               elif url:
-                  temp_ = io.BytesIO()
-                  async with aiohttp.ClientSession() as session:
-                     async with session.get(url) as r:
-                        raw = await r.read()
-                        temp_.write(raw)
-                        temp_.seek(0)
-
-               if sys.getsizeof(temp_) > (500 * 1000): # 500 KB limit
-                  return temp_.close()
-               try:
-                  im = Image.open(temp_)
-                  partial = functools.partial(pytesseract.image_to_string, im, lang = 'eng')
-                  texts.append(await asyncio.wait_for(asyncio.get_event_loop().run_in_executor(None, partial), timeout = 3))
-               except UnidentifiedImageError:
-                  return
-               except Exception:
-                  pass
-               temp_.close()
-               im.close()
-
-            for attach in message.attachments:
-                await image_to_string(attachment = attach)
-
-            for url in IMAGE_REGEX.findall(message.content):
-                await image_to_string(url = url)
-
-            message_raw['images'] = ' '.join(texts)
          
          return cls(**message_raw)
 

@@ -11,20 +11,19 @@ class Trades(commands.Cog):
         self.bot = bot
         self.config = Config.get_conf(self, identifier = 719180744311701505)
         self.config.register_guild(
-            vote__role = None,
-            vote__channel = None
+            vote__role = None
         )
         self.config.register_member(
             vote__reminders = True
         )
-        self._reminder = Reminder(self, interval = 60)
+        self._reminder = Reminder(self)
 
     async def cog_check(self, ctx: commands.Context) -> bool:
         return ctx.guild.id == TRADES_GUILD_ID
 
     @commands.Cog.listener('on_member_update')
     async def _vote_reminder_event(self, before: discord.Member, after: discord.Member):
-        if after.guild.id != TRADES_GUILD_ID or before.roles == after.roles:
+        if after.guild.id != TRADES_GUILD_ID or before.roles == after.roles or after.bot:
            return
         if await self.config.member(after).vote.reminders() == False:
            return
@@ -40,7 +39,7 @@ class Trades(commands.Cog):
         """Base command for Vote Reminders
 
         **Arguments:**
-          - `on_or_off`: Whether you want to be reminded to vote or not. 
+          - `on_or_off`: Whether you want to be reminded to vote again or not. 
         """
         async with self.config.member(ctx.author).vote() as conf:
             if conf['reminders'] == on_or_off:
@@ -57,14 +56,6 @@ class Trades(commands.Cog):
         await self.config.guild(ctx.guild).vote.role.set(role.id)
         await ctx.reply(
             f'Set Voter Role to {role.name}.'
-        )
-
-    @_vote_reminder.command(name = 'channel')
-    @commands.admin_or_permissions(manage_guild = True)
-    async def _vote_reminder_channel(self, ctx: commands.Context, channel: discord.TextChannel):
-        await self.config.guild(ctx.guild).vote.channel.set(channel.id)
-        await ctx.reply(
-            f'Set Reminder Channel to {channel.name}.'
         )
 
     @commands.command(name = 'embedpeek', usage = '[message_id] [channel] [start_field]')

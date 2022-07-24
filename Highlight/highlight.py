@@ -11,9 +11,16 @@ from redbot.core import commands, Config
 from redbot.core.utils.chat_formatting import humanize_list, humanize_timedelta
 from redbot.core.utils.menus import start_adding_reactions
 from redbot.core.utils.predicates import ReactionPredicate
-from .helpers import HighlightView, Matches, MessageRaw
-from .converters import HighlightFlagResolver, TimeConverter
-from typing import Union, List, Optional, Dict
+from .helpers import (
+      HighlightView, 
+      Matches, 
+      MessageRaw
+   )
+from .converters import (
+      HighlightFlagResolver, 
+      TimeConverter
+   )
+from typing import Union, Optional, Literal
 
 log = logging.getLogger('red.cogs.Highlight')
 
@@ -33,7 +40,6 @@ class Highlight(commands.Cog):
               'cooldown': 60,
               'bots': False,
               'embeds': False,
-              'images': False,
               'colour': discord.Colour.green().value
           }
           self.config.register_member(**default_member)
@@ -47,7 +53,10 @@ class Highlight(commands.Cog):
           self.config.register_channel(highlights = {})
           self.last_seen = {}
           self.cooldowns = {} # TODO: Cache config
-               
+
+      async def red_delete_data_for_user(self, *, requester: Literal["discord_deleted_user", "owner", "user", "user_strict"], user_id: int):
+         ...
+
       @commands.Cog.listener('on_message')
       async def on_message(self, message: discord.Message):
 
@@ -173,50 +182,40 @@ class Highlight(commands.Cog):
          If you were last seen in more than 2 categories, you will not get highlighted for the entire guild.
          """
          await ctx.invoke(self.bot.get_command('highlight add'), word = word)
-      
-      @highlight.command(name = 'add', aliases = ['+'])
-      async def highlight_add(self, ctx: commands.Context, *, word: HighlightFlagResolver):
-         """Add words to your highlights.
 
-         You can add a maximum of 25 highlights per guild, and 10 per channel.
+      @highlight.group(name = 'channel', autohelp = True)
+      async def highlight_channel(self, ctx: commands.Context):
+         """Manage channel-specific highlights."""
+         ...
+
+      @highlight_channel.command(name = 'add')
+      async def highlight_channel_add(self, ctx: commands.Context, channel: Optional[Union[discord.TextChannel, discord.VoiceChannel]], *, word: HighlightFlagResolver):
+         """Add words to your channel highlights.
+
+         You can add a maximum of 10 highlights per channel, there is no limit for the number for channels you can add highlights to.
 
          **Flags:**
-            > `--channel`: Add the word(s) to a specified channel's highlights, this defaults to the current channel.
             > `--multiple`: Add multiple words to your highlights at once.
             > `--wildcard`: Attempts to search for bypasses fetching matches.
             > `--regex`: Add a Regular expression to your highlights. It is suggested you [learn regex](https://github.com/ziishaned/learn-regex) and [debug](https://regex101.com/) it first.
-            > `--set <types...>`: Additional config for the added highlights. Valid Types: `bots`, `embeds` and `images`.
+            > `--set <types...>`: Additional config for the added highlights. Valid Types: `bots`, `embeds`.
          """
-         if any(len(x) > 50 for x in word['words']):
-            return await ctx.send('The word cannot be more than 50 characters long.')
+         channel = channel or ctx.channel
 
-         if any(len(x) < 2 for x in word['words']):
-            return await ctx.send('The word must be atleast 2 characters long.')
-
-         channel = word['channel']
-
-         config_method = self.config.channel(channel).highlights() if channel else self.config.guild(ctx.guild).highlights()
-     
-         async with config_method as config:
+         async with self.config.channel(channel).highlights() as config:
                user_config  = config.setdefault(str(ctx.author.id), [])
                
                for d in user_config:
                    if d['highlight'] in word['words']:
-                      return await ctx.send('\"{highlight}\" is already in your {extra}.'.format(
-                           highlight = d['highlight'],
-                           extra = f'highlights for {channel}' if channel else 'guild highlights'
-                      ))
+                      return await ctx.send(f'\"{d["highlight"]}\" is already in your highlights for #{channel.name}.')
 
-               if len(user_config) + len(word['words']) >= (limit := 10 if channel else 25):
-                  return await ctx.reply('You have reached the maximum of `{limit}` highlights for this {type}.'.format(
-                     limit = limit,
-                     type = 'channel' if channel else 'guild'
-                  ))
+               if len(user_config) + len(word['words']) >= 10:
+                  return await ctx.reply(f'You have reached the maximum of `10` highlights for #{channel.name}.')
    
                data = [
                   {
-                     'highlight': highlight, 
-                     'channel': channel.id if channel else None, 
+                     'highlight': highlight,
+                     'channel': channel.id,
                      'type': word['type'],
                      'settings': word['settings']
                   }
@@ -225,20 +224,120 @@ class Highlight(commands.Cog):
                user_config.extend(data)
                config[str(ctx.author.id)] = user_config
 
-         await ctx.reply('Added {formatted} to your {extra}.'.format(
-            formatted = humanize_list([f"\'{x}\'" for x in word['words']]),
-            extra = f'highlights for {channel.mention}' if channel else 'guild highlights'
+         await ctx.reply('Added {formatted} to your highlights for {channel.mention}.'.format(
+            formatted = humanize_list([f"\"{x}\"" for x in word['words']]),
+            channel = channel
+         ))
+
+      @highlight_channel.command(name = 'remove')
+      async def highlight_channel_remove(self, ctx: commands.Context, channel: Optional[Union[discord.TextChannel, discord.VoiceChannel]], *, word: HighlightFlagResolver):
+         """Removes word(s) from your channel highlights."""
+
+         channel = channel or ctx.channel
+
+         async with self.config.channel(channel).highlights() as config:
+            user_config = config.get(str(ctx.author.id), [])
+
+            if not user_config:
+               return await ctx.send(f'You have no highlights added for #{channel.name}.')
+
+            not_highlighted = [w for w in word['words'] if not any(d['highlight'] == w for d in user_config)]
+            if not_highlighted:
+               return await ctx.send('{formatted} is not highlighted for you.'.format(
+                  formatted = humanize_list([f"\'{x}\'" for x in not_highlighted])
+               ))
+
+            for d in user_config:
+               if d['highlight'] in word['words']:
+                  user_config.remove(d)
+            config[str(ctx.author.id)] = user_config
+            
+         return await ctx.reply('Removed {formatted} from your guild highlights.'.format(
+            formatted = humanize_list([f"\"{x}\"" for x in word['words']])
+         ))
+
+      @highlight_channel.command(name = 'sync')
+      async def highlight_sync(self, ctx: commands.Context, base_channel: Union[discord.TextChannel, discord.VoiceChannel], channels_and_categories: commands.Greedy[Union[discord.TextChannel, discord.VoiceChannel, discord.CategoryChannel]]):
+         """Syncs your highlights from one channel to multiple others.
+         
+         This will replace the highlights of all the channels mentioned in `<channels_and_categories>` with those of the base channel.
+         
+         **Arguments:**
+            - `<base_channel>`: The channel to sync highlights from.
+            - `<channels_and_categories>`: The channels to sync highlights to, if a category is passed, highlights are synced with all the channels in that category. Including voice channels.
+            
+         """
+         channels = [channel for channel in channels_and_categories if not isinstance(channel, discord.CategoryChannel)]
+         for channel in channels_and_categories:
+             if isinstance(channel, discord.CategoryChannel):
+                channels.extend(c for c in channel.channels)
+         
+         base_config = (await self.config.channel(base_channel).highlights()).get(str(ctx.author.id), [])
+         if not base_config:
+            return await ctx.send(f'You have no highlights for {base_channel.mention}.')
+
+         msg = await ctx.send(f'Are you sure you want to sync **{len(base_config)}** highlight{"s" if len(base_config) > 1 else ""} from {base_channel.mention} to **{len(channels)}** other channel{"s" if len(channels) > 1 else ""}?\n\n**Note:** This will **replace** the highlights of all the channels passed with those of the base channel.')
+         start_adding_reactions(msg, ReactionPredicate.YES_OR_NO_EMOJIS)
+         pred = ReactionPredicate.yes_or_no(msg, ctx.author)
+         try:
+            await self.bot.wait_for('reaction_add', check = pred, timeout = 30.0)
+         except asyncio.TimeoutError:
+            return await msg.delete()
+
+         await msg.delete()
+         if pred.result is True:
+            for channel in channels:
+               async with self.config.channel(channel).highlights() as highlight:
+                     highlight[str(ctx.author.id)] = base_config
+            await ctx.send('done.')
+         else:
+            return await ctx.send('kden....')
+
+      @highlight.command(name = 'add', aliases = ['+'])
+      async def highlight_add(self, ctx: commands.Context, *, word: HighlightFlagResolver):
+         """Add words to your guild highlights.
+
+         You can add a maximum of 25 highlights per guild.
+
+         **Flags:**
+            > `--multiple`: Add multiple words to your highlights at once.
+            > `--wildcard`: Attempts to search for bypasses fetching matches.
+            > `--regex`: Add a Regular expression to your highlights. It is suggested you [learn regex](https://github.com/ziishaned/learn-regex) and [debug](https://regex101.com/) it first.
+            > `--set <types...>`: Additional config for the added highlights. Valid Types: `bots`, `embeds`.
+         """
+     
+         async with self.config.guild(ctx.guild).highlights() as config:
+               user_config  = config.setdefault(str(ctx.author.id), [])
+               
+               for d in user_config:
+                   if d['highlight'] in word['words']:
+                      return await ctx.send(f'\"{d["highlight"]}\" is already in your guild highlights.')
+
+               if len(user_config) + len(word['words']) >= 25:
+                  return await ctx.reply('You have reached the maximum of `25` highlights for this guild.')
+   
+               data = [
+                  {
+                     'highlight': highlight,
+                     'type': word['type'],
+                     'settings': word['settings']
+                  }
+                    for highlight in word['words']
+               ]
+               user_config.extend(data)
+               config[str(ctx.author.id)] = user_config
+
+         await ctx.reply('Added {formatted} to your guild highlights.'.format(
+            formatted = humanize_list([f"\"{x}\"" for x in word['words']])
          ))
       
       @highlight.command(name = 'remove', aliases = ['-'])
       async def highlight_remove(self, ctx: commands.Context, *, word: HighlightFlagResolver):
-         """Removes a word from your highlights."""
-      
-         channel = word['channel']
-         config_method = self.config.channel(channel).highlights() if channel else self.config.guild(ctx.guild).highlights()
+         """Removes word(s) from your guild highlights."""
 
-         async with config_method as config:
+         async with self.config.guild(ctx.guild).highlights() as config:
             user_config = config.get(str(ctx.author.id), [])
+
             if not user_config:
                return await ctx.send('You have no highlights added.')
 
@@ -253,9 +352,8 @@ class Highlight(commands.Cog):
                   user_config.remove(d)
             config[str(ctx.author.id)] = user_config
             
-         return await ctx.reply('Removed {formatted} from your {extra}.'.format(
-            formatted = humanize_list([f"\'{x}\'" for x in word['words']]),
-            extra = f'highlights for {channel.mention}' if channel else 'guild highlights'
+         return await ctx.reply('Removed {formatted} from your guild highlights.'.format(
+            formatted = humanize_list([f"\"{x}\"" for x in word['words']])
          ))
 
       @highlight.command(name = 'ignore', aliases = ['block'])
@@ -263,8 +361,9 @@ class Highlight(commands.Cog):
          """Blocks a Member or Channel from Highlighting you."""
 
          async with self.config.member(ctx.author).blocks() as current:
-            current = list(set(current + [obj.id for obj in blocks]))
-            await self.config.member(ctx.author).blocks.set(current)
+            for block in blocks:
+                if not block.id in current:
+                   current.append(block.id)
 
          member_config = await self.config.member(ctx.author).all()
          embed = discord.Embed(
@@ -341,46 +440,6 @@ class Highlight(commands.Cog):
 
          return await ctx.reply(embed = embed)
 
-      @highlight.command(name = 'sync')
-      async def highlight_sync(self, ctx: commands.Context, base_channel: Union[discord.TextChannel, discord.VoiceChannel], channels_and_categories: commands.Greedy[Union[discord.TextChannel, discord.VoiceChannel, discord.CategoryChannel]]):
-         """Syncs your highlights from one channel to multiple others.
-         
-         This will replace the highlights of all the channels mentioned in `<channels_and_categories>` with those of the base channel.
-         
-         **Arguments:**
-            - `<base_channel>`: The channel to sync highlights from.
-            - `<channels_and_categories>`: The channels to sync highlights to, if a category is passed, highlights are synced with all the channels in that category. Including voice channels.
-            
-         """
-         return await ctx.reply(
-            'This command has been disabled temprarily.'
-         )
-         channels = [channel for channel in channels_and_categories if not isinstance(channel, discord.CategoryChannel)]
-         for channel in channels_and_categories:
-             if isinstance(channel, discord.CategoryChannel):
-               channels.extend(c for c in channel.channels)
-         
-         base_config = (await self.config.channel(base_channel).highlights()).get(str(ctx.author.id), [])
-         if not base_config:
-            return await ctx.send(f'You have no highlights for {base_channel.mention}.')
-
-         msg = await ctx.send(f'Are you sure you want to sync **{len(base_config)}** highlight{"s" if len(base_config) > 1 else ""} from {base_channel.mention} to **{len(channels)}** other channel{"s" if len(channels) > 1 else ""}?\n\n**Note:** This will **replace** the highlights of all the channels passed with those of the base channel.')
-         start_adding_reactions(msg, ReactionPredicate.YES_OR_NO_EMOJIS)
-         pred = ReactionPredicate.yes_or_no(msg, ctx.author)
-         try:
-            await self.bot.wait_for('reaction_add', check = pred, timeout = 30.0)
-         except asyncio.TimeoutError:
-            return await msg.delete()
-
-         await msg.delete()
-         if pred.result is True:
-            for channel in channels:
-               async with self.config.channel(channel).highlights() as highlight:
-                     highlight[str(ctx.author.id)] = base_config
-            await ctx.send('done.')
-         else:
-            return await ctx.send('kden....')
-
       @highlight.command(name = 'clear')
       async def highlight_clear(self, ctx: commands.Context):
          """Clears your highlights."""
@@ -395,10 +454,10 @@ class Highlight(commands.Cog):
                confirm_message.clear_reactions()
             )
          except asyncio.TimeoutError:
-            return await confirm_message('Operation cancelled.')
+            return await confirm_message.edit(content = 'Operation cancelled.')
          
          if not pred.result is True:
-            return await confirm_message.edit('Operation cancelled.')
+            return await confirm_message.edit(content = 'Operation cancelled.')
 
          deleted_count = 0
          async with self.config.guild(ctx.guild).highlights() as guild_highlights:
@@ -493,12 +552,6 @@ class Highlight(commands.Cog):
          """
          await self._toggle_settings(ctx, 'embeds', yes_or_no)
 
-      @highlight_set.command(name = 'images', aliases = ['files'])
-      async def highlight_set_images(self, ctx: commands.Context, yes_or_no: bool):
-         """Get highlights from text in an image.
-         """
-         await self._toggle_settings(ctx, 'images', yes_or_no)
-
       @highlight_set.command(name = 'colour', aliases = ['color'])
       async def highlight_set_colour(self, ctx: commands.Context, *, colour: commands.ColourConverter):
          """Sets the default embed colour."""
@@ -515,8 +568,7 @@ class Highlight(commands.Cog):
             description = '\n'.join([
                f'Cooldown: {humanize_timedelta(seconds = (data["cooldown"]))}',
                f'Bots: {data["bots"]}',
-               f'Embeds: {data["embeds"]}',
-               f'Images (beta): {data["images"]}'
+               f'Embeds: {data["embeds"]}'
             ]),
             colour = data['colour'],
             timestamp = datetime.datetime.utcnow()
