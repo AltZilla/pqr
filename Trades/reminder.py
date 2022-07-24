@@ -5,7 +5,6 @@ import logging
 
 from . import TRADES_GUILD_ID
 from redbot.core import commands
-from redbot.core.utils.chat_formatting import humanize_list
 
 log = logging.getLogger('red.cogs.Trades')
 
