@@ -1,64 +1,46 @@
-import discord
-import aiohttp
 import asyncio
+import logging
+import discord
 import functools
-import io
 import re
-import sys
 
 from copy import copy
-from typing import List
+from typing import Any, Dict, List
+from redbot.core import commands, Config
 from redbot.core.utils.chat_formatting import humanize_list
 from stemming.porter2 import stem
 
-class MessageRaw:
-    def __init__(self, message: discord.Message, bots: str):
-        self._message = message
-        self._bots = bots
+log = logging.getLogger('red.cogs.Highlight')
 
-    def string_from_config(self, default_conf: dict, highlight_conf: dict):
-        content, settings = (
-           copy(self._message.content if not self._message.author.bot else ''),
-           highlight_conf.get('settings', [])
-        )
+def _message(message: discord.Message):
+        message_raw = {
+            'content': message.content,
+            'clean_content': message.clean_content,
+            'embeds': ''
+        }
 
-        if (default_conf.get('bots') or 'bots' in settings) and self._message.author.bot:
-           content += self._message.content + ' ' + self._bots
-
-        return content
-        
-    @classmethod
-    async def from_message(cls, message: discord.Message):
-         message_raw = {
-            'message': message,
-            'bots': ''
-         }
-
-         if message.embeds:
+        if message.embeds:
             texts = []
             for embed in message.embeds:
                 for key, value in embed.to_dict().items():
                     if key in ['type', 'color']:
-                       continue
+                        continue
                     if isinstance(value, dict):
-                       for k, v in value.items():
-                           if not str(v).startswith('http'): # ignore links
-                              texts.append(str(v))
+                        for k, v in value.items():
+                            if not str(v).startswith('http'): # ignore links
+                                texts.append(str(v))
                     elif isinstance(value, list):
-                       texts.extend(field['name'] + ' ' + field['value'] for field in value)
+                        texts.extend(field['name'] + ' ' + field['value'] for field in value)
                     else:
-                       texts.append(value)
+                        texts.append(value)
 
-            message_raw['bots'] = ' '.join(texts)
-         
-         return cls(**message_raw)
+            message_raw['embeds'] = ' '.join(texts)
+        return message_raw
 
 class Matches:
-    def __init__(self, conf: dict, highlights: dict, message_raw: MessageRaw = None):
+    def __init__(self):
         self._matches = []
-        self._conf = conf
-        self._highlights = highlights
-        self._message_raw = message_raw
+        self.matched_types = set()
 
     def __len__(self):
         return self._matches.__len__()
@@ -69,47 +51,53 @@ class Matches:
                return True
         return False
 
-    def add_match(self, match: re.Match, highlight_data: dict):
-        if not any(h['highlight'] == highlight_data['highlight'] for h in self._matches):
-           highlight_data['match'] = match.group(0)
-           self._matches.append(highlight_data)
+    def add_match(self, match: re.Match, highlight):
+        if not any(h['highlight'] == highlight for h in self._matches):
+           self._matches.append({'match': match.group(0), 'highlight': highlight.highlight, 'type': highlight.type})
 
     def remove_match(self, match: str):
         for item in self._matches:
             if item['match'] == match:
                self._matches.remove(item)
 
-    async def resolve(self, message: discord.Message = None):
-        if not self._message_raw:
-           self._message_raw = await MessageRaw.from_message(message)
-
-        for data in self._highlights:
-              s = self._message_raw.string_from_config(default_conf = self._conf, highlight_conf = data)
-              stemmed_content = ' '.join(stem(word) for word in s.split())
-
-              type_converter = {
-                  'default': lambda: re.compile(rf'\b{re.escape(data["highlight"])}\b', re.IGNORECASE),
-                  'regex': lambda: re.compile(data['highlight']),
-                  'wildcard': lambda: re.compile(''.join([f'{re.escape(char)}[ _.{re.escape(char)}-]*' for char in data['highlight']]), re.IGNORECASE)
-              }
-            
-              pattern = type_converter.get(data['type'])()
-              if match := pattern.search(s):
-                  self.add_match(match = match, highlight_data = data)
-              elif (match := pattern.search(stemmed_content)) and data['type'] == 'default':
-                  self.add_match(match = match, highlight_data = data)
+    async def resolve(self, highlights, message):
+        message_content_data = _message(message)
+        for highlight in highlights:
+            result = await highlight.get_matches(message_content_data)
+            if result['match']:
+               self.add_match(match = result['match'], highlight = highlight)
+               self.matched_types.add(result['matched_type'])
         return self
+
+    def create_embed(self, history: List[str], message: discord.Message, settings: Dict[str, Any]):
+        return discord.Embed(
+            title = self.format_title(),
+            description = '\n'.join(history),
+            colour = settings['colour'],
+            timestamp = message.created_at
+        ).add_field(
+            name = 'Source Message',
+            value = f'[Jump To]({message.jump_url})'
+        ).set_footer(text = self.format_footer() + '| Triggered At')
+
 
     def format_response(self):
         response = []
         for item in self._matches:
             conversions = {
-                'default': lambda: f'\"{item["match"]}\"',
-                'wildcard': lambda: f'\"{item["match" if len(item["match"]) < 100 else "[EXCEEDED 100 CHAR LIMIT]"]}\"' if item['match'].strip().lower() == item['highlight'].strip().lower() else f'\"{item["match"]}\" from wildcard `({item["highlight"]})`',
-                'regex': lambda: f'\"{item["match"] if len(item["match"]) < 100 else "[EXCEEDED 100 CHAR LIMIT]"}\" from regex `({item["highlight"]})`'
+                'default': f'\"{item["match"]}\"',
+                'wildcard': f'\"{item["match" if len(item["match"]) < 100 else "[EXCEEDED 100 CHAR LIMIT]"]}\"' if item['match'].strip().lower() == item['highlight'].strip().lower() else f'\"{item["match"]}\" from wildcard `({item["highlight"]})`',
+                'regex': f'\"{item["match"] if len(item["match"]) < 100 else "[EXCEEDED 100 CHAR LIMIT]"}\" from regex `({item["highlight"]})`'
             }
-            response.append(conversions.get(item['type'])())
+            response.append(conversions.get(item['type']))
         return humanize_list(response[:10])
+
+    def format_footer(self):
+        _ = []
+        for _type in self.matched_types:
+            if not _type in ['content']: # No point showing this
+               _.append(_type)
+        return ' | '.join(_)
 
     def format_title(self):
         matches = [item['match'].strip() for item in self._matches]
@@ -122,9 +110,88 @@ class Matches:
         if len(title) > 50:
            title = title[:47] + '...'
         return title
+
+class MemberHighlight:
+    def __init__(self, **kwargs) -> None:
+        self.highlight = kwargs.get('highlight')
+
+        if not self.highlight:
+           raise TypeError('The Highlight kwargs is required..')
+
+        self.type = kwargs.get('type', 'default')
+        self.settings = kwargs.get('settings', [])
+        type_converter = {
+            'default': re.compile(rf'\b{re.escape(self.highlight)}\b', re.IGNORECASE),
+            'regex': re.compile(self.highlight),
+            'wildcard': re.compile(''.join([f'{re.escape(char)}[ _.{re.escape(char)}-]*' for char in self.highlight]), re.IGNORECASE)
+        }
+        self.pattern = type_converter.get(self.type)
+            
+    def filter_contents(self, data: Dict[str, str], force: Dict[str, bool] = {}):
+        return data
+
+    async def get_matches(self, content_dict: Dict[str, str]):
+        return_data = {'match': None, 'matched_type': None}
+        for content_type, content in content_dict.items():
+            result = self.pattern.search(content)
+            if result:
+               return_data.update(match = result, matched_type = content_type)
+               return return_data
+        return return_data
+
+class HighlightHandler:
+
+    bot: commands.Bot
+    config: Config
+
+    def __init_sublass__(cls) -> None:
+        pass
+
+    def get_highlights_for_message(self, message: discord.Message) -> Dict:
+        highlights = {}
+        
+        guild_highlights, channel_highlights = (
+            self.guild_config.get(message.guild.id, {}).copy(),
+            self.channel_config.get(message.channel.id, {}).copy()
+        )
+        print(channel_highlights)
+        for member_id, data in guild_highlights.get('highlights', {}).items():
+            highlights.setdefault(int(member_id), []).extend(data)
+
+        for member_id, data in channel_highlights.get('highlights', {}).items():
+            highlights.setdefault(int(member_id), []).extend(data)
+        
+        return highlights
+
+    def get_all_member_highlights(self, member: discord.Member):
+        highlights = {}
+
+    async def generate_cache(self):
+        await self.bot.wait_until_ready()
+        self.guild_config = await self.config.all_guilds()
+        self.channel_config = await self.config.all_channels()
+        self.member_config = await self.config.all_members()
+
+        self._handle_cache()
+
+    def _handle_cache(self):
+        for guild_id, data in self.guild_config.items():
+            for member_id, highlights in data.get('highlights', {}).items():
+                data['highlights'][member_id] = [MemberHighlight(**highlight) for highlight in highlights]
+
+        for channel_id, data in self.channel_config.items():
+            for member_id, synced_channel_id in data.get('synced_with', {}).items():
+                if synced_channel_id:
+                   self.channel_config[channel_id]['highlights'][member_id] = self.channel_config.get(synced_channel_id, {}).get('highlights', {}).get(member_id, [])
+
+        for channel_id, data in self.channel_config.items():
+            for member_id, highlights in data.get('highlights', {}).items():
+                data['highlights'][member_id] = [MemberHighlight(**highlight) for highlight in highlights]
+                
+        print(self.guild_config, self.channel_config)
     
 class HighlightView(discord.ui.View):
-   def __init__(self, message: discord.Message, highlights: list, positions: List[int] = None):
+   def __init__(self, message: discord.Message, highlights: list):
        super().__init__(timeout = None)
        self.message = message
        self.content = message.content

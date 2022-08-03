@@ -13,13 +13,14 @@ from redbot.core.utils.menus import start_adding_reactions
 from redbot.core.utils.predicates import ReactionPredicate
 from .helpers import (
       HighlightView, 
-      Matches, 
-      MessageRaw
-   )
+      HighlightHandler,
+      Matches
+)
 from .converters import (
       HighlightFlagResolver, 
       TimeConverter
-   )
+)
+
 from typing import Union, Optional, Literal
 
 log = logging.getLogger('red.cogs.Highlight')
@@ -30,7 +31,7 @@ async def allowed_check(ctx: commands.Context):
          return True
       return False
 
-class Highlight(commands.Cog):
+class Highlight(HighlightHandler, commands.Cog):
 
       def __init__(self, bot: commands.Bot):
           self.bot = bot
@@ -40,6 +41,7 @@ class Highlight(commands.Cog):
               'cooldown': 60,
               'bots': False,
               'embeds': False,
+              'edits': False,
               'colour': discord.Colour.green().value
           }
           self.config.register_member(**default_member)
@@ -50,13 +52,17 @@ class Highlight(commands.Cog):
               len__max = 50
           )
           self.config.register_guild(highlights = {}, allowed_roles = [])
-          self.config.register_channel(highlights = {})
+          self.config.register_channel(highlights = {}, synced_with = {})
           self.last_seen = {}
           self.cooldowns = {} # TODO: Cache config
+          self.cache = {} # guild_channel_id -> member_id -> Data
 
       async def red_delete_data_for_user(self, *, requester: Literal["discord_deleted_user", "owner", "user", "user_strict"], user_id: int):
          ...
 
+      async def cog_load(self):
+         asyncio.create_task(self.generate_cache())
+         
       @commands.Cog.listener('on_message')
       async def on_message(self, message: discord.Message):
 
@@ -68,26 +74,16 @@ class Highlight(commands.Cog):
 
          self.last_seen.setdefault(message.guild.id, {}).setdefault(message.author.id, {})[(message.channel.category or message.channel).id] = time.time()
 
-         guild_highlights, channel_highlights, min_cd = (
-            await self.config.guild(message.guild).highlights(),
-            await self.config.channel(message.channel).highlights(),
-            await self.config.cooldown.min()
-         )
+         min_cd = await self.config.cooldown.min()
 
-         # merge guild and channel highlights
-         highlights = {}
-         for d in (guild_highlights, channel_highlights):
-             for member_id, hls in d.items():
-                 highlights.setdefault(int(member_id), []).extend(hls)
-
-         message_raw = await MessageRaw.from_message(message)
+         highlights = self.get_highlights_for_message(message=message)
 
          history = [
                '**[<t:{timestamp}:T>] {author}:** {content} {attachments} {embeds}'.format(
                      timestamp = int(message.created_at.timestamp()),
                      author = message.author,
                      content = message.content[:500],
-                     attachments = f' <Attachments {", ".join([f"[{index}]({attach.url})" for index, attach in enumerate(message.attachments)])}>' if message.attachments else '',
+                     attachments = f' <Attachments {", ".join([f"[{index}]({attach.url})" for index, attach in enumerate(message.attachments, 1)])}>' if message.attachments else '',
                      embeds = ' [embeds]' if message.embeds else ''
                )
              ]
@@ -99,7 +95,7 @@ class Highlight(commands.Cog):
             sorted_history = sorted(filter(lambda m: m.channel == message.channel and m.created_at < message.created_at, self.bot.cached_messages), key = lambda m: m.created_at, reverse = True)
             history.extend([f'[<t:{int(msg.created_at.timestamp())}:T>] **{msg.author}:** {msg.content[:200]}' for msg in sorted_history][:4])
             history.reverse()
-
+            
          for member_id, highlight in highlights.items():
              member = message.guild.get_member(member_id)
              if not member:
@@ -119,7 +115,7 @@ class Highlight(commands.Cog):
                 )
                 if lsc > (time.time() - 300) or len(filtered) > 2:
                    continue
-             matches = await Matches(data, highlight, message_raw).resolve()
+             matches = await Matches().resolve(highlights = highlight, message = message)
              if not matches:
                 continue
              if (
@@ -131,23 +127,12 @@ class Highlight(commands.Cog):
                 continue
              self.cooldowns.setdefault(message.guild.id, {})[member.id] = time.time()
 
-             embed = discord.Embed(
-                  title = matches.format_title(),
-                  description = '\n'.join(history),
-                  timestamp = message.created_at,
-                  colour = data['colour']
-             ).add_field(
-                  name = 'Source Message',
-                  value = f'[Jump To]({message.jump_url})'
-             ).set_footer(
-                  text = 'Triggered At'
-             )
+             embed = matches.create_embed(history = history, message = message, settings = data)
              try:
-                log.info(f'Sent Highlight to {member}, member was last highlighted at: {cd}')
                 await member.send(
                      content = f'In **{message.guild.name}** {message.channel.mention}, you were mentioned with the highlighted word{"s" if len(matches) > 1 else ""} {matches.format_response()}.',
                      embed = embed,
-                     view =  HighlightView(message, [d['highlight'] for d in highlight])
+                     view =  HighlightView(message, [hl.highlight for hl in highlight])
                 )
              except discord.HTTPException:
                 pass
@@ -186,7 +171,7 @@ class Highlight(commands.Cog):
       @highlight.group(name = 'channel', autohelp = True)
       async def highlight_channel(self, ctx: commands.Context):
          """Manage channel-specific highlights."""
-         ...
+         pass
 
       @highlight_channel.command(name = 'add')
       async def highlight_channel_add(self, ctx: commands.Context, channel: Optional[Union[discord.TextChannel, discord.VoiceChannel]], *, word: HighlightFlagResolver):
@@ -478,15 +463,12 @@ class Highlight(commands.Cog):
       async def highlight_matches(self, ctx: commands.Context, *, string: str):
          """Shows the highlights that match a given string."""
 
-         guild_highlights, channel_highlights, member_config = (
-            (await self.config.guild(ctx.guild).highlights()).get(str(ctx.author.id), []),
-            (await self.config.channel(ctx.channel).highlights()).get(str(ctx.author.id), []),
+         member_config, highlights = (
             await self.config.member(ctx.author).all()
          )
-         highlight_data = guild_highlights + channel_highlights
-         matches = await Matches(member_config, highlight_data).resolve(ctx.message)
+         matches = await Matches().resolve(ctx.message)
          description = []
-         for d in highlight_data:
+         for d in highlights:
              if d['highlight'] in matches:
                 description.append('✅ ' + d['highlight'])
              else:
@@ -568,7 +550,8 @@ class Highlight(commands.Cog):
             description = '\n'.join([
                f'Cooldown: {humanize_timedelta(seconds = (data["cooldown"]))}',
                f'Bots: {data["bots"]}',
-               f'Embeds: {data["embeds"]}'
+               f'Embeds: {data["embeds"]}',
+               f'Edits (soon): {data["edits"]}'
             ]),
             colour = data['colour'],
             timestamp = datetime.datetime.utcnow()
