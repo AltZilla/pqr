@@ -1,7 +1,7 @@
 import discord
 
 from redbot.core import commands
-from redbot.core.utils.chat_formatting import pagify
+from redbot.core.utils.chat_formatting import pagify, escape
 
 class Menu(discord.ui.View):
     def __init__(self, interaction: discord.Interaction, pages):
@@ -43,6 +43,8 @@ class Menu(discord.ui.View):
 class EmbedDropdown(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         _format = await self.view._format(self.values[0])
+        if not _format:
+           return await interaction.response.send_message('That field does not exist in that embed.', ephemeral = True)
         await interaction.response.defer()
         await Menu(interaction, [page for page in pagify(_format, delims = ["\n\n"])]).edit(meta = self.view)
 
@@ -58,15 +60,15 @@ class EmbedPeekView(discord.ui.View):
     async def _format(self, name: str):
         response = self._embed.get(name)
         if isinstance(response, str):
-           return f'**{name.capitalize()}:** {response}'
+           return f'**{name.capitalize()}:** {escape(response, formatting = True)}'
         elif isinstance(response, dict):
-           return '\n\n'.join([f'**{key.capitalize()}:** {value}' for key, value in response.items()])
+           return '\n\n'.join([f'**{key.capitalize()}:** {escape(value, formatting = True)}' for key, value in response.items()])
         elif isinstance(response, list):
            formatted = []
            for i, field in enumerate(response, 1):
                header = f'--------------Field {i}--------------\n\n'
                formatted.append(
-                  header + '\n'.join([f'**{key.capitalize()}:** {value}' for key, value in reversed(field.items()) if key not in ['inline']])
+                  header + '\n'.join([f'**{key.capitalize()}:** {escape(value, formatting = True)}' for key, value in reversed(field.items()) if key not in ['inline']])
                )
            return '\n\n'.join(formatted)
 
