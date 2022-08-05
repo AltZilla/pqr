@@ -19,7 +19,10 @@ async def _possible_mentions(interaction: discord.Interaction, message: discord.
 
     async def _process(querry, choices, t = 'extract', limit = 5):
         loop = asyncio.get_event_loop()
-        partial = functools.partial(getattr(process, t), querry, choices, limit = limit)
+        if t == 'extract':
+           partial = functools.partial(process.extract, querry, choices, limit = limit)
+        else:
+           partial = functools.partial(process.extractOne, querry, choices)
         return await loop.run_in_executor(
             None, partial
         )
