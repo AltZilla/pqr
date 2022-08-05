@@ -1,3 +1,5 @@
+import asyncio
+import functools
 import re
 import discord
 
@@ -14,6 +16,14 @@ async def _possible_mentions(interaction: discord.Interaction, message: discord.
     result: List[Tuple[discord.Object, int]] = []
     string = message.clean_content
     await interaction.response.defer(ephemeral=True)
+
+    async def _process(querry, choices, t = 'extract', limit = 5):
+        loop = asyncio.get_event_loop()
+        partial = functools.partial(getattr(process, t), querry, choices, limit = limit)
+        return await loop.run_in_executor(
+            None, partial
+        )
+
     if message.embeds:
         def clean(d):
             d = list(d)
@@ -40,20 +50,20 @@ async def _possible_mentions(interaction: discord.Interaction, message: discord.
         return True
 
     for _id in re.findall(r'(?P<id>[0-9]{15,20})', string):
-        obj_id, score = process.extractOne(_id, map(lambda o: o.id, to_check))
+        obj_id, score = await _process(_id, map(lambda o: o.id, to_check), 'extractOne')
         obj = discord.utils.get(to_check, id = obj_id)
         if _check(obj):
            result.append((obj, score))
     
     for _tag in re.findall(r'.{1,50}#[0-9]{4}', string):
-        obj, score = process.extractOne(_tag, message.guild.members)
+        obj, score = await _process(_tag, message.guild.members, 'extractOne')
         if _check(obj):
            result.append((obj, score))
 
     remaining = 10 - len(result)
 
     if remaining > 0:
-       _extracted = process.extract(string, map(lambda m: m.name, to_check), limit = remaining)
+       _extracted = await _process(string, map(lambda m: m.name, to_check), limit = remaining)
        for name, score in _extracted:
            obj = discord.utils.get(to_check, name = name)
            if _check(obj):
