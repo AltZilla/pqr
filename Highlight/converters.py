@@ -69,7 +69,11 @@ class HighlightFlagResolver(commands.Converter, NoExitParser):
                   await ctx.send_help()
                   raise commands.BadArgument(f'Invalid Setting \"{setting}\", read the help embed again ^^')
 
-        args['words'] = list(set(map(lambda w: w.strip().lower(), args['words'])))
+        # one two three -m
+        e = map(lambda w: w.strip().lower(), args['words'])
+        args['words'] = list(set(e))
+
+        print(list(e))
         
         args['type'] = 'regex' if args['regex'] else 'wildcard' if args['wildcard'] else 'default'
         return args

@@ -8,6 +8,7 @@ import datetime
 from io import BytesIO
 from discord.ext import commands as dpy_commands
 from redbot.core import commands, Config
+from redbot.core.utils import AsyncIter
 from redbot.core.utils.chat_formatting import humanize_list, humanize_timedelta
 from redbot.core.utils.menus import start_adding_reactions
 from redbot.core.utils.predicates import ReactionPredicate
@@ -17,14 +18,14 @@ from .helpers import (
       Matches
 )
 from .converters import (
-      HighlightFlagResolver, 
-      TimeConverter
+      HighlightFlagResolver
 )
 
 from typing import Union, Optional, Literal
 
 log = logging.getLogger('red.cogs.Highlight')
 
+dpy_commands.cog
 async def allowed_check(ctx: commands.Context):
       allowed_roles = await ctx.cog.config.guild(ctx.guild).allowed_roles()
       if any(role.id in allowed_roles for role in ctx.author.roles) or allowed_roles == []:
@@ -74,8 +75,6 @@ class Highlight(HighlightHandler, commands.Cog):
 
          self.last_seen.setdefault(message.guild.id, {}).setdefault(message.author.id, {})[(message.channel.category or message.channel).id] = time.time()
 
-         min_cd = await self.config.cooldown.min()
-
          highlights = self.get_highlights_for_message(message=message)
 
          history = [
@@ -96,12 +95,12 @@ class Highlight(HighlightHandler, commands.Cog):
             history.extend([f'[<t:{int(msg.created_at.timestamp())}:T>] **{msg.author}:** {msg.content[:200]}' for msg in sorted_history][:4])
             history.reverse()
             
-         for member_id, highlight in highlights.items():
+         async for member_id, highlight in AsyncIter(highlights.items(), steps = 1000):
              member = message.guild.get_member(member_id)
              if not member:
                 continue
              data = await self.config.member(member).all()
-             cooldown = data['cooldown'] if data['cooldown'] > min_cd else min_cd
+             cooldown = self._check_cooldown(seconds = data['cooldown'])
              if (
                 (cd := self.cooldowns.get(message.guild.id, {}).get(member.id))
                 and cd >= (time.time() - cooldown)
@@ -115,7 +114,7 @@ class Highlight(HighlightHandler, commands.Cog):
                 )
                 if lsc > (time.time() - 300) or len(filtered) > 2:
                    continue
-             matches = await Matches().resolve(highlights = highlight, message = message)
+             matches = await Matches._resolve(highlights = highlight, message = message)
              if not matches:
                 continue
              if (
@@ -252,6 +251,9 @@ class Highlight(HighlightHandler, commands.Cog):
             - `<channels_and_categories>`: The channels to sync highlights to, if a category is passed, highlights are synced with all the channels in that category. Including voice channels.
             
          """
+         return await ctx.send(
+            'This command has been temporarily disabled.'
+         )
          channels = [channel for channel in channels_and_categories if not isinstance(channel, discord.CategoryChannel)]
          for channel in channels_and_categories:
              if isinstance(channel, discord.CategoryChannel):
@@ -487,11 +489,7 @@ class Highlight(HighlightHandler, commands.Cog):
       async def highlight_export(self, ctx: commands.Context):
          """Export your highlights to a JSON file.
          """
-         highlights = ( await self.config.guild(ctx.guild).highlights() ).get(str(ctx.author.id), [])
-
-         for channel_id, highlight in (await self.config.all_channels()).items():
-             if ctx.guild.get_channel(channel_id):
-                highlights.extend(highlight['highlights'].get(str(ctx.author.id), []))
+         highlights = self.get_all_member_highlights(member = ctx.author, as_dict = True)
 
          _file = BytesIO(json.dumps(highlights, indent = 3).encode())
          await ctx.send(file = discord.File(_file, 'highlights.json'))
@@ -501,16 +499,18 @@ class Highlight(HighlightHandler, commands.Cog):
          """Settings for Highlight."""
 
       @highlight_set.command(name = 'cooldown', aliases = ['cd', 'ratelimit'])
-      async def highlight_set_rate(self, ctx: commands.Context, rate: TimeConverter = None):
-         """Sets the cooldown for being highlighted."""
+      async def highlight_set_rate(self, ctx: commands.Context, rate: commands.TimedeltaConverter = None):
+         """Sets the cooldown for being highlighted.
+         
+         Min / Max = 30 / 600 Seconds :thumbsup:
+         """
 
          current = await self.config.member(ctx.author).cooldown()
          if rate is None:
             return await ctx.reply(f'Your current cooldown is **{humanize_timedelta(seconds = current)}**.')
-         if rate > 600 or rate < 1:
-            return await ctx.reply('Cooldown cannot be more than 10 minutes or less than 1 second.')
+         rate = self._check_cooldown(seconds = rate.total_seconds())
          await self.config.member(ctx.author).cooldown.set(rate)
-         await ctx.reply(f'Alright, your cooldown is now {humanize_timedelta(seconds = rate)}.')
+         await ctx.reply(f'Alright, your cooldown is now **{humanize_timedelta(seconds = rate)}**.')
 
       async def _toggle_settings(self, ctx: commands.Context, name: str, yes_or_no: bool):
          async with self.config.member(ctx.author).all() as conf:

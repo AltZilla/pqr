@@ -60,6 +60,10 @@ class Matches:
             if item['match'] == match:
                self._matches.remove(item)
 
+    @classmethod
+    async def _resolve(cls, *args, **kwargs):
+        return await cls().resolve(*args, **kwargs)
+
     async def resolve(self, highlights, message):
         message_content_data = _message(message)
         for highlight in highlights:
@@ -120,13 +124,24 @@ class MemberHighlight:
 
         self.type = kwargs.get('type', 'default')
         self.settings = kwargs.get('settings', [])
+
         type_converter = {
             'default': re.compile(rf'\b{re.escape(self.highlight)}\b', re.IGNORECASE),
             'regex': re.compile(self.highlight),
             'wildcard': re.compile(''.join([f'{re.escape(char)}[ _.{re.escape(char)}-]*' for char in self.highlight]), re.IGNORECASE)
         }
         self.pattern = type_converter.get(self.type)
+
+    def __repr__(self) -> str:
+        return self.highlight
             
+    def to_dict(self):
+        return {
+            'Highlight': self.highlight,
+            'Type': self.type,
+            'Settings': self.settings
+        }
+
     def filter_contents(self, data: Dict[str, str], force: Dict[str, bool] = {}):
         return data
 
@@ -136,7 +151,7 @@ class MemberHighlight:
             result = self.pattern.search(content)
             if result:
                return_data.update(match = result, matched_type = content_type)
-               return return_data
+               break
         return return_data
 
 class HighlightHandler:
@@ -154,7 +169,6 @@ class HighlightHandler:
             self.guild_config.get(message.guild.id, {}).copy(),
             self.channel_config.get(message.channel.id, {}).copy()
         )
-        print(channel_highlights)
         for member_id, data in guild_highlights.get('highlights', {}).items():
             highlights.setdefault(int(member_id), []).extend(data)
 
@@ -163,14 +177,28 @@ class HighlightHandler:
         
         return highlights
 
-    def get_all_member_highlights(self, member: discord.Member):
-        highlights = {}
+    def get_all_member_highlights(self, member: discord.Member, as_dict = False):
+        data = {
+            'guild': self.guild_config.get(member.guild.id, {}).get('highlights', {}).get(str(member.id), []), 
+            'channels': {
+                channel_id: _data['highlights'].get(str(member.id), [])
+                for channel_id, _data in self.channel_config.items() if member.guild.get_channel(channel_id)
+            } 
+        }
+        if as_dict:
+           data['guild'] = [highlight.to_dict() for highlight in data['guild']]
+
+           for channel_id, _data in data['channels'].items():
+               data['channels'][channel_id] = [highlight.to_dict() for highlight in _data]
+
+        return data
 
     async def generate_cache(self):
         await self.bot.wait_until_ready()
         self.guild_config = await self.config.all_guilds()
         self.channel_config = await self.config.all_channels()
         self.member_config = await self.config.all_members()
+        self.global_cache = await self.config.all()
 
         self._handle_cache()
 
@@ -187,8 +215,9 @@ class HighlightHandler:
         for channel_id, data in self.channel_config.items():
             for member_id, highlights in data.get('highlights', {}).items():
                 data['highlights'][member_id] = [MemberHighlight(**highlight) for highlight in highlights]
-                
-        print(self.guild_config, self.channel_config)
+
+    def _check_cooldown(self, seconds: int):
+        return min(max(seconds, self.global_cache['cooldown']['min']), self.global_cache['cooldown']['max'])
     
 class HighlightView(discord.ui.View):
    def __init__(self, message: discord.Message, highlights: list):
