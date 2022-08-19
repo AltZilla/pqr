@@ -5,9 +5,9 @@ import functools
 import re
 
 from copy import copy
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from redbot.core import commands, Config
-from redbot.core.utils.chat_formatting import humanize_list
+from redbot.core.utils.chat_formatting import humanize_list, inline, italics
 from stemming.porter2 import stem
 
 log = logging.getLogger('red.cogs.Highlight')
@@ -16,6 +16,7 @@ def _message(message: discord.Message):
         message_raw = {
             'content': message.content,
             'clean_content': message.clean_content,
+            'stem': ' '.join(stem(w) for w in message.content.split()),
             'embeds': ''
         }
 
@@ -192,6 +193,75 @@ class HighlightHandler:
                data['channels'][channel_id] = [highlight.to_dict() for highlight in _data]
 
         return data
+
+    async def handle_highlight_update(self, ctx: commands.Context, data, **kwargs):
+        ret = await self.update_member_highlights(ctx.author, data, **kwargs)
+
+        description = []
+        if channel := kwargs.get('channel'):
+           description.append(f'Channel: {channel.mention} - ({channel.name})')
+
+        if ret['added']:
+            description.extend((
+                f'Type: {data["type"]}', 
+                f'Settings: {humanize_list(data["settings"]) or italics("No Settings !")}'))
+
+        embed = discord.Embed(
+            title = "Updated Highlights",
+            description = '\n'.join(description),
+            color = self.member_config.get(ctx.guild.id, {}).get(ctx.author.id, {}).get('colour')
+        )
+
+        for _key, value in filter(lambda k: k[1], ret.items()):
+            embed.add_field(
+                name = f'{_key.capitalize()} ({len(value)})',
+                value = '\n'.join(map(inline, value[:5])),
+                inline = False
+            )
+
+        await ctx.send(embed = embed)
+
+    async def update_member_highlights(self, member: discord.Member, data: Dict[str, Any], action: Optional[str] = "add", channel = None):
+        if channel:
+           config_method = self.config.channel(channel)
+        else:
+           config_method = self.config.guild(member.guild)
+        ret = dict(added = [], removed = [], error = [])
+
+        # {'words': ['hm', 'aaaa'], 'multiple': True, 'regex': False, 'wildcard': False, 'settings': [], 'type': 'default'}
+        async with config_method.highlights() as config:
+            user_config: List[str, Any] = config.setdefault(str(member.id), [])
+
+            for i, word in enumerate(data['words'], 0):
+                if any(_highlight['highlight'] == word for _highlight in user_config) and action == "add":
+                    ret['error'].append(
+                        {data['words'].pop(i): 'already in member\'s highlights.'}
+                    )
+
+                if not any(_highlight['highlight'] == word for _highlight in user_config) and action == "remove":
+                    ret['error'].append(
+                        {data['words'].pop(i): 'not currently highlighted for <member>.'}
+                    )
+
+            for highlight in data['words']:
+                hl = {
+                    'highlight': highlight,
+                    'type': data['type'],
+                    'settings': data['settings']
+                }
+                if action in ('add', None):
+                    if not any(_highlight['highlight'] == word for _highlight in user_config):
+                        user_config.append(hl)
+                        ret['added'].append(hl['highlight'])
+                elif action in ('remove', None):
+                    if any(_highlight['highlight'] == word for _highlight in user_config):
+                        for _data in user_config:
+                            if _data['highlight'] == highlight:
+                               user_config.remove(_data)
+                               ret['removed'].append(hl['highlight'])
+
+        await self.generate_cache()
+        return ret
 
     async def generate_cache(self):
         await self.bot.wait_until_ready()

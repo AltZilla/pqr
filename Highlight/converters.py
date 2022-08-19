@@ -72,8 +72,6 @@ class HighlightFlagResolver(commands.Converter, NoExitParser):
         # one two three -m
         e = map(lambda w: w.strip().lower(), args['words'])
         args['words'] = list(set(e))
-
-        print(list(e))
         
         args['type'] = 'regex' if args['regex'] else 'wildcard' if args['wildcard'] else 'default'
         return args

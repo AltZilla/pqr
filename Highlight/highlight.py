@@ -25,7 +25,6 @@ from typing import Union, Optional, Literal
 
 log = logging.getLogger('red.cogs.Highlight')
 
-dpy_commands.cog
 async def allowed_check(ctx: commands.Context):
       allowed_roles = await ctx.cog.config.guild(ctx.guild).allowed_roles()
       if any(role.id in allowed_roles for role in ctx.author.roles) or allowed_roles == []:
@@ -37,7 +36,7 @@ class Highlight(HighlightHandler, commands.Cog):
       def __init__(self, bot: commands.Bot):
           self.bot = bot
           self.config = Config.get_conf(self, identifier = 1698497658475, force_registration = True)
-          default_member = {
+          self.default_member = {
               'blocks': [],
               'cooldown': 60,
               'bots': False,
@@ -45,7 +44,7 @@ class Highlight(HighlightHandler, commands.Cog):
               'edits': False,
               'colour': discord.Colour.green().value
           }
-          self.config.register_member(**default_member)
+          self.config.register_member(**self.default_member)
           self.config.register_global(
               cooldown__min = 30,
               cooldown__max = 600,
@@ -55,8 +54,8 @@ class Highlight(HighlightHandler, commands.Cog):
           self.config.register_guild(highlights = {}, allowed_roles = [])
           self.config.register_channel(highlights = {}, synced_with = {})
           self.last_seen = {}
-          self.cooldowns = {} # TODO: Cache config
-          self.cache = {} # guild_channel_id -> member_id -> Data
+          self.cooldowns = {}
+          self.blacklist = {} # member_id -> Data
 
       async def red_delete_data_for_user(self, *, requester: Literal["discord_deleted_user", "owner", "user", "user_strict"], user_id: int):
          ...
@@ -165,7 +164,7 @@ class Highlight(HighlightHandler, commands.Cog):
 
          If you were last seen in more than 2 categories, you will not get highlighted for the entire guild.
          """
-         await ctx.invoke(self.bot.get_command('highlight add'), word = word)
+         await self.handle_highlight_update(ctx, word, action = None)
 
       @highlight.group(name = 'channel', autohelp = True)
       async def highlight_channel(self, ctx: commands.Context):
@@ -292,56 +291,13 @@ class Highlight(HighlightHandler, commands.Cog):
             > `--regex`: Add a Regular expression to your highlights. It is suggested you [learn regex](https://github.com/ziishaned/learn-regex) and [debug](https://regex101.com/) it first.
             > `--set <types...>`: Additional config for the added highlights. Valid Types: `bots`, `embeds`.
          """
-     
-         async with self.config.guild(ctx.guild).highlights() as config:
-               user_config  = config.setdefault(str(ctx.author.id), [])
-               
-               for d in user_config:
-                   if d['highlight'] in word['words']:
-                      return await ctx.send(f'\"{d["highlight"]}\" is already in your guild highlights.')
-
-               if len(user_config) + len(word['words']) >= 25:
-                  return await ctx.reply('You have reached the maximum of `25` highlights for this guild.')
-   
-               data = [
-                  {
-                     'highlight': highlight,
-                     'type': word['type'],
-                     'settings': word['settings']
-                  }
-                    for highlight in word['words']
-               ]
-               user_config.extend(data)
-               config[str(ctx.author.id)] = user_config
-
-         await ctx.reply('Added {formatted} to your guild highlights.'.format(
-            formatted = humanize_list([f"\"{x}\"" for x in word['words']])
-         ))
+         await self.handle_highlight_update(ctx, word)
       
       @highlight.command(name = 'remove', aliases = ['-'])
       async def highlight_remove(self, ctx: commands.Context, *, word: HighlightFlagResolver):
          """Removes word(s) from your guild highlights."""
 
-         async with self.config.guild(ctx.guild).highlights() as config:
-            user_config = config.get(str(ctx.author.id), [])
-
-            if not user_config:
-               return await ctx.send('You have no highlights added.')
-
-            not_highlighted = [w for w in word['words'] if not any(d['highlight'] == w for d in user_config)]
-            if not_highlighted:
-               return await ctx.send('{formatted} is not highlighted for you.'.format(
-                  formatted = humanize_list([f"\'{x}\'" for x in not_highlighted])
-               ))
-
-            for d in user_config:
-               if d['highlight'] in word['words']:
-                  user_config.remove(d)
-            config[str(ctx.author.id)] = user_config
-            
-         return await ctx.reply('Removed {formatted} from your guild highlights.'.format(
-            formatted = humanize_list([f"\"{x}\"" for x in word['words']])
-         ))
+         await self.handle_highlight_update(ctx, word, action = 'remove')
 
       @highlight.command(name = 'ignore', aliases = ['block'])
       async def highlight_ignore(self, ctx: commands.Context, blocks: commands.Greedy[Union[discord.Member, discord.TextChannel, discord.VoiceChannel]]):
@@ -459,7 +415,7 @@ class Highlight(HighlightHandler, commands.Cog):
                     del channel_highlights[str(ctx.author.id)]
                     deleted_count += len(h)
 
-         await confirm_message.edit(f'A total of **{deleted_count}** highlights were deleted.')
+         await confirm_message.edit(f'Removed **{deleted_count}** highlights from you.')
 
       @highlight.command(name = 'matches')
       async def highlight_matches(self, ctx: commands.Context, *, string: str):
