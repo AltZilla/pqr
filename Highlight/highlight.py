@@ -20,6 +20,7 @@ from .helpers import (
 from .converters import (
       HighlightFlagResolver
 )
+from .menus import ChannelShowMenu
 
 from typing import Union, Optional, Literal
 
@@ -183,61 +184,13 @@ class Highlight(HighlightHandler, commands.Cog):
             > `--regex`: Add a Regular expression to your highlights. It is suggested you [learn regex](https://github.com/ziishaned/learn-regex) and [debug](https://regex101.com/) it first.
             > `--set <types...>`: Additional config for the added highlights. Valid Types: `bots`, `embeds`.
          """
-         channel = channel or ctx.channel
-
-         async with self.config.channel(channel).highlights() as config:
-               user_config  = config.setdefault(str(ctx.author.id), [])
-               
-               for d in user_config:
-                   if d['highlight'] in word['words']:
-                      return await ctx.send(f'\"{d["highlight"]}\" is already in your highlights for #{channel.name}.')
-
-               if len(user_config) + len(word['words']) >= 10:
-                  return await ctx.reply(f'You have reached the maximum of `10` highlights for #{channel.name}.')
-   
-               data = [
-                  {
-                     'highlight': highlight,
-                     'channel': channel.id,
-                     'type': word['type'],
-                     'settings': word['settings']
-                  }
-                    for highlight in word['words']
-               ]
-               user_config.extend(data)
-               config[str(ctx.author.id)] = user_config
-
-         await ctx.reply('Added {formatted} to your highlights for {channel.mention}.'.format(
-            formatted = humanize_list([f"\"{x}\"" for x in word['words']]),
-            channel = channel
-         ))
+         await self.handle_highlight_update(ctx, word, action = 'add', channel = channel or ctx.channel)
 
       @highlight_channel.command(name = 'remove')
       async def highlight_channel_remove(self, ctx: commands.Context, channel: Optional[Union[discord.TextChannel, discord.VoiceChannel]], *, word: HighlightFlagResolver):
          """Removes word(s) from your channel highlights."""
 
-         channel = channel or ctx.channel
-
-         async with self.config.channel(channel).highlights() as config:
-            user_config = config.get(str(ctx.author.id), [])
-
-            if not user_config:
-               return await ctx.send(f'You have no highlights added for #{channel.name}.')
-
-            not_highlighted = [w for w in word['words'] if not any(d['highlight'] == w for d in user_config)]
-            if not_highlighted:
-               return await ctx.send('{formatted} is not highlighted for you.'.format(
-                  formatted = humanize_list([f"\'{x}\'" for x in not_highlighted])
-               ))
-
-            for d in user_config:
-               if d['highlight'] in word['words']:
-                  user_config.remove(d)
-            config[str(ctx.author.id)] = user_config
-            
-         return await ctx.reply('Removed {formatted} from your guild highlights.'.format(
-            formatted = humanize_list([f"\"{x}\"" for x in word['words']])
-         ))
+         await self.handle_highlight_update(ctx, word, action = 'remove', channel = channel or ctx.channel)
 
       @highlight_channel.command(name = 'sync')
       async def highlight_sync(self, ctx: commands.Context, base_channel: Union[discord.TextChannel, discord.VoiceChannel], channels_and_categories: commands.Greedy[Union[discord.TextChannel, discord.VoiceChannel, discord.CategoryChannel]]):
@@ -291,7 +244,7 @@ class Highlight(HighlightHandler, commands.Cog):
             > `--regex`: Add a Regular expression to your highlights. It is suggested you [learn regex](https://github.com/ziishaned/learn-regex) and [debug](https://regex101.com/) it first.
             > `--set <types...>`: Additional config for the added highlights. Valid Types: `bots`, `embeds`.
          """
-         await self.handle_highlight_update(ctx, word)
+         await self.handle_highlight_update(ctx, word, action = 'add')
       
       @highlight.command(name = 'remove', aliases = ['-'])
       async def highlight_remove(self, ctx: commands.Context, *, word: HighlightFlagResolver):
@@ -351,6 +304,11 @@ class Highlight(HighlightHandler, commands.Cog):
       async def highlight_show(self, ctx: commands.Context, channel: Optional[Union[discord.TextChannel, discord.VoiceChannel]]):
          """Shows your current highlights."""
 
+         all_highlights = self.get_all_member_highlights(ctx.author, as_dict = True)
+         await ctx.send('test', view = ChannelShowMenu(
+            self.bot, all_highlights
+         ))
+         return
          member_config = await self.config.member(ctx.author).all()
          if channel:
             current = (await self.config.channel(channel).highlights()).get(str(ctx.author.id), [])

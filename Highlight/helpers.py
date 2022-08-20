@@ -180,17 +180,12 @@ class HighlightHandler:
 
     def get_all_member_highlights(self, member: discord.Member, as_dict = False):
         data = {
-            'guild': self.guild_config.get(member.guild.id, {}).get('highlights', {}).get(str(member.id), []), 
-            'channels': {
-                channel_id: _data['highlights'].get(str(member.id), [])
-                for channel_id, _data in self.channel_config.items() if member.guild.get_channel(channel_id)
-            } 
+            'guild': self.guild_config.get(member.guild.id, {}).get('highlights', {}).get(str(member.id), [])
         }
+        data.update([(channel_id, data.get('highlights', {}).get(str(member.id), [])) for channel_id, data in self.channel_config.items() if member.guild.get_channel(channel_id)])
         if as_dict:
-           data['guild'] = [highlight.to_dict() for highlight in data['guild']]
-
-           for channel_id, _data in data['channels'].items():
-               data['channels'][channel_id] = [highlight.to_dict() for highlight in _data]
+            for _key, _data in data.items():
+                data[_key] = [highlight.to_dict() for highlight in _data]
 
         return data
 
