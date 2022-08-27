@@ -305,41 +305,7 @@ class Highlight(HighlightHandler, commands.Cog):
          """Shows your current highlights."""
 
          all_highlights = self.get_all_member_highlights(ctx.author, as_dict = True)
-         await ctx.send('test', view = ChannelShowMenu(
-            self.bot, all_highlights
-         ))
-         return
-         member_config = await self.config.member(ctx.author).all()
-         if channel:
-            current = (await self.config.channel(channel).highlights()).get(str(ctx.author.id), [])
-            if not current:
-               return await ctx.reply('You are not currently tracking anything.')
-
-            embed = discord.Embed(
-               title = f'Your current highlights for #{channel.name}',
-               description = '\n'.join(c['highlight'] for c in current),
-               timestamp = datetime.datetime.utcnow(),
-               colour = member_config.get('colour', 0x00ff00)
-            )
-            return await ctx.reply(embed = embed)
-         current = (await self.config.guild(ctx.guild).highlights()).get(str(ctx.author.id), [])
-         if not current:
-            return await ctx.reply('You are not currently tracking anything.')
-
-         embed = discord.Embed(
-               title = 'You\'re currently tracking the following words',
-               description = '\n'.join(c['highlight'] for c in current),
-               timestamp = datetime.datetime.utcnow(),
-               colour = member_config.get('colour', 0x00ff00)
-         )
- 
-         if (user_blocks := [ctx.guild.get_member(user).mention for user in member_config['blocks'] if ctx.guild.get_member(user) != None]):
-            embed.add_field(name = 'Ignored Users', value = '\n'.join(user_blocks))
-
-         if (channel_blocks := [ctx.guild.get_channel(channel).mention for channel in member_config['blocks'] if ctx.guild.get_channel(channel) != None]):
-            embed.add_field(name = 'Ignored Channels', value = '\n'.join(channel_blocks))
-
-         return await ctx.reply(embed = embed)
+         await ChannelShowMenu(ctx, all_highlights).send(start_value = getattr(channel, 'id', None))
 
       @highlight.command(name = 'clear')
       async def highlight_clear(self, ctx: commands.Context):
@@ -382,7 +348,7 @@ class Highlight(HighlightHandler, commands.Cog):
          member_config, highlights = (
             await self.config.member(ctx.author).all()
          )
-         matches = await Matches().resolve(ctx.message)
+         matches = await Matches._resolve(ctx.message)
          description = []
          for d in highlights:
              if d['highlight'] in matches:

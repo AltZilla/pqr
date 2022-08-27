@@ -193,50 +193,47 @@ class HighlightHandler:
         ret = await self.update_member_highlights(ctx.author, data, **kwargs)
 
         description = []
-        if channel := kwargs.get('channel'):
-           description.append(f'Channel: {channel.mention} - ({channel.name})')
 
         if ret['added']:
-            description.extend((
-                f'Type: {data["type"]}', 
-                f'Settings: {humanize_list(data["settings"]) or italics("No Settings !")}'))
-
-        embed = discord.Embed(
-            title = "Updated Highlights",
-            description = '\n'.join(description),
-            color = self.member_config.get(ctx.guild.id, {}).get(ctx.author.id, {}).get('colour')
-        )
-
-        for _key, value in filter(lambda k: k[1], ret.items()):
-            embed.add_field(
-                name = f'{_key.capitalize()} ({len(value)})',
-                value = '\n'.join(map(inline, value[:5])),
-                inline = False
+            description.append(
+                f"+ Added {humanize_list([inline(text) for text in ret['added']])} to your highlights"
             )
+            if data['settings']:
+                description.append(
+                    '-----------------\n'
+                    f'Settings Applied -> {humanize_list([italics(setting) for setting in data["settings"]])}'
+                )
 
-        await ctx.send(embed = embed)
+        if ret['removed']:
+            description.append(
+                f"- Removed {humanize_list([inline(text) for text in ret['added']])} from your highlights"
+            )
+        
+        if ret['error']:
+            for reason, highlights in ret['error'].items():
+                description.append(reason + ' ' + humanize_list([inline(h) for h in highlights]))
+
+        await ctx.send('\n'.join(description))
 
     async def update_member_highlights(self, member: discord.Member, data: Dict[str, Any], action: Optional[str] = "add", channel = None):
         if channel:
            config_method = self.config.channel(channel)
         else:
            config_method = self.config.guild(member.guild)
-        ret = dict(added = [], removed = [], error = [])
+        ret = dict(added = [], removed = [], error = {})
 
         # {'words': ['hm', 'aaaa'], 'multiple': True, 'regex': False, 'wildcard': False, 'settings': [], 'type': 'default'}
         async with config_method.highlights() as config:
             user_config: List[str, Any] = config.setdefault(str(member.id), [])
 
-            for i, word in enumerate(data['words'], 0):
+            for word in data['words'].copy():
                 if any(_highlight['highlight'] == word for _highlight in user_config) and action == "add":
-                    ret['error'].append(
-                        {data['words'].pop(i): 'already in member\'s highlights.'}
-                    )
+                    ret['error'].setdefault('The following words were already highlighted for you ->', []).append(word)
+                    data['words'].remove(word)
 
                 if not any(_highlight['highlight'] == word for _highlight in user_config) and action == "remove":
-                    ret['error'].append(
-                        {data['words'].pop(i): 'not currently highlighted for <member>.'}
-                    )
+                    ret['error'].setdefault('The following words were not highlighted for you ->', []).append(word)
+                    data['words'].remove(word)
 
             for highlight in data['words']:
                 hl = {
@@ -245,16 +242,18 @@ class HighlightHandler:
                     'settings': data['settings']
                 }
                 if action in ('add', None):
-                    if not any(_highlight['highlight'] == word for _highlight in user_config):
+                    if not any(_highlight['highlight'] == highlight for _highlight in user_config):
                         user_config.append(hl)
                         ret['added'].append(hl['highlight'])
-                elif action in ('remove', None):
-                    if any(_highlight['highlight'] == word for _highlight in user_config):
-                        for _data in user_config:
-                            if _data['highlight'] == highlight:
-                               user_config.remove(_data)
-                               ret['removed'].append(hl['highlight'])
+                        continue
 
+                if action in ('remove', None):
+                    if to_remove := [_highlight for _highlight in user_config if _highlight['highlight'] == highlight]:
+                        for _data in to_remove:
+                            user_config.remove(_data)
+                            ret['removed'].append(_data['highlight'])                    
+                        continue
+                    
         await self.generate_cache()
         return ret
 
