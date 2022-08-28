@@ -4,6 +4,7 @@ import asyncio
 import time
 import logging
 import datetime
+import multiprocessing as mp
 
 from io import BytesIO
 from discord.ext import commands as dpy_commands
@@ -58,6 +59,8 @@ class Highlight(HighlightHandler, commands.Cog):
           self.cooldowns = {}
           self.blacklist = {} # member_id -> Data
 
+          self.re_pool = mp.Pool()
+
       async def red_delete_data_for_user(self, *, requester: Literal["discord_deleted_user", "owner", "user", "user_strict"], user_id: int):
          ...
 
@@ -75,7 +78,7 @@ class Highlight(HighlightHandler, commands.Cog):
 
          self.last_seen.setdefault(message.guild.id, {}).setdefault(message.author.id, {})[(message.channel.category or message.channel).id] = time.time()
 
-         highlights = self.get_highlights_for_message(message=message)
+         highlights = await self.get_highlights_for_message(message=message)
 
          history = [
                '**[<t:{timestamp}:T>] {author}:** {content} {attachments} {embeds}'.format(
@@ -131,7 +134,7 @@ class Highlight(HighlightHandler, commands.Cog):
                 await member.send(
                      content = f'In **{message.guild.name}** {message.channel.mention}, you were mentioned with the highlighted word{"s" if len(matches) > 1 else ""} {matches.format_response()}.',
                      embed = embed,
-                     view =  HighlightView(message, [hl.highlight for hl in highlight])
+                     view =  HighlightView(message, [hl['highlight'] for hl in highlight])
                 )
              except discord.HTTPException:
                 pass
@@ -256,56 +259,20 @@ class Highlight(HighlightHandler, commands.Cog):
       async def highlight_ignore(self, ctx: commands.Context, blocks: commands.Greedy[Union[discord.Member, discord.TextChannel, discord.VoiceChannel]]):
          """Blocks a Member or Channel from Highlighting you."""
 
-         async with self.config.member(ctx.author).blocks() as current:
-            for block in blocks:
-                if not block.id in current:
-                   current.append(block.id)
-
-         member_config = await self.config.member(ctx.author).all()
-         embed = discord.Embed(
-            title = 'Your current ignores',
-            colour = member_config['colour'],
-            timestamp = datetime.datetime.utcnow()
-         ).set_footer(text = f'{len(current)} ignores')
-
-         if (user_blocks := [ctx.guild.get_member(user).mention for user in current if ctx.guild.get_member(user) != None]):
-            embed.add_field(name = 'Users', value = '\n'.join(user_blocks), inline = False)
-            
-         if (channel_blocks := [ctx.guild.get_channel(channel).mention for channel in current if ctx.guild.get_channel(channel) != None]):
-            embed.add_field(name = 'Channels', value = '\n'.join(channel_blocks), inline = False)
-
-         return await ctx.reply(embed = embed)
+         await self.handle_block_update(ctx, blocks, 'add')
 
       @highlight.command(name = 'unignore', aliases = ['unblock'])
       async def highlight_unignore(self, ctx: commands.Context, blocks: commands.Greedy[Union[discord.Member, discord.TextChannel, discord.VoiceChannel]]):
          """Unblocks a Member or Channel from Highlighting you."""
 
-         async with self.config.member(ctx.author).blocks() as current:
-            for obj in blocks:
-               if obj.id in current:
-                  current.remove(obj.id)
-
-         member_config = await self.config.member(ctx.author).all()
-         embed = discord.Embed(
-            title = 'Your current ignores',
-            colour = member_config['colour'],
-            timestamp = datetime.datetime.utcnow()
-         ).set_footer(text = f'{len(current)} ignores')
-
-         if (user_blocks := [ctx.guild.get_member(user).mention for user in current if ctx.guild.get_member(user) != None]):
-            embed.add_field(name = 'Users', value = '\n'.join(user_blocks))
-            
-         if (channel_blocks := [ctx.guild.get_channel(channel).mention for channel in current if ctx.guild.get_channel(channel) != None]):
-            embed.add_field(name = 'Channels', value = '\n'.join(channel_blocks))
-
-         return await ctx.reply(embed = embed)
+         await self.handle_block_update(ctx, blocks, 'remove')
 
       @highlight.command(name = 'show', aliases = ['list', 'display'])
       async def highlight_show(self, ctx: commands.Context, channel: Optional[Union[discord.TextChannel, discord.VoiceChannel]]):
          """Shows your current highlights."""
 
-         all_highlights = self.get_all_member_highlights(ctx.author, as_dict = True)
-         await ChannelShowMenu(ctx, all_highlights).send(start_value = getattr(channel, 'id', None))
+         all_highlights = await self.get_all_member_highlights(ctx.author)
+         await ChannelShowMenu(ctx, all_highlights, self.member_config.get(ctx.guild.id).get(ctx.author.id, {}).get('blocks', []), ).send(start_value = getattr(channel, 'id', None))
 
       @highlight.command(name = 'clear')
       async def highlight_clear(self, ctx: commands.Context):
@@ -340,11 +307,15 @@ class Highlight(HighlightHandler, commands.Cog):
                     deleted_count += len(h)
 
          await confirm_message.edit(f'Removed **{deleted_count}** highlights from you.')
+         await self.generate_cache()
 
       @highlight.command(name = 'matches')
       async def highlight_matches(self, ctx: commands.Context, *, string: str):
          """Shows the highlights that match a given string."""
 
+         return await ctx.reply(
+            'This command is currently disabled.'
+         )
          member_config, highlights = (
             await self.config.member(ctx.author).all()
          )
@@ -369,7 +340,7 @@ class Highlight(HighlightHandler, commands.Cog):
       async def highlight_export(self, ctx: commands.Context):
          """Export your highlights to a JSON file.
          """
-         highlights = self.get_all_member_highlights(member = ctx.author, as_dict = True)
+         highlights = await self.get_all_member_highlights(member = ctx.author)
 
          _file = BytesIO(json.dumps(highlights, indent = 3).encode())
          await ctx.send(file = discord.File(_file, 'highlights.json'))
@@ -379,7 +350,7 @@ class Highlight(HighlightHandler, commands.Cog):
          """Settings for Highlight."""
 
       @highlight_set.command(name = 'cooldown', aliases = ['cd', 'ratelimit'])
-      async def highlight_set_rate(self, ctx: commands.Context, rate: commands.TimedeltaConverter = None):
+      async def highlight_set_rate(self, ctx: commands.Context, *, rate: commands.TimedeltaConverter = None):
          """Sets the cooldown for being highlighted.
          
          Min / Max = 30 / 600 Seconds :thumbsup:
@@ -393,6 +364,8 @@ class Highlight(HighlightHandler, commands.Cog):
          await ctx.reply(f'Alright, your cooldown is now **{humanize_timedelta(seconds = rate)}**.')
 
       async def _toggle_settings(self, ctx: commands.Context, name: str, yes_or_no: bool):
+         raise commands.DisabledCommand('Setting commands have been temporarily disabled :thumbsup:')
+
          async with self.config.member(ctx.author).all() as conf:
             if yes_or_no == conf[name]:
                return await ctx.reply(f'This is already {"enabled" if yes_or_no else "disabled"} for you....')

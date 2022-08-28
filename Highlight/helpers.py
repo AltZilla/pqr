@@ -1,11 +1,12 @@
 import asyncio
 import logging
+import multiprocessing
 import discord
 import functools
 import re
 
 from copy import copy
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from redbot.core import commands, Config
 from redbot.core.utils.chat_formatting import humanize_list, inline, italics
 from stemming.porter2 import stem
@@ -52,9 +53,9 @@ class Matches:
                return True
         return False
 
-    def add_match(self, match: re.Match, highlight):
+    def add_match(self, match: list, highlight):
         if not any(h['highlight'] == highlight for h in self._matches):
-           self._matches.append({'match': match.group(0), 'highlight': highlight.highlight, 'type': highlight.type})
+           self._matches.append({'match': ''.join(match), 'highlight': highlight['highlight'], 'type': highlight['type']})
 
     def remove_match(self, match: str):
         for item in self._matches:
@@ -66,12 +67,28 @@ class Matches:
         return await cls().resolve(*args, **kwargs)
 
     async def resolve(self, highlights, message):
-        message_content_data = _message(message)
+        message_check = {
+            'content': message.content
+        }
+        re_pool = multiprocessing.Pool()
         for highlight in highlights:
-            result = await highlight.get_matches(message_content_data)
-            if result['match']:
-               self.add_match(match = result['match'], highlight = highlight)
-               self.matched_types.add(result['matched_type'])
+            highlight_text = highlight['highlight']
+            pattern = {
+                'default': re.compile(rf'\b{re.escape(highlight_text)}\b', re.IGNORECASE),
+                'regex': re.compile(highlight_text),
+                'wildcard': re.compile(''.join([f'{re.escape(char)}[ _.{re.escape(char)}-]*' for char in highlight_text]), re.IGNORECASE)
+            }[highlight['type']]
+
+            for content_type, content in message_check.items():
+                process = re_pool.apply_async(pattern.findall, (content,))
+                task = asyncio.get_event_loop().run_in_executor(
+                    None, functools.partial(process.get, timeout = 2)
+                )
+                result = await asyncio.wait_for(task, timeout = 5)
+                if result:
+                    self.add_match(result, highlight)
+                    self.matched_types.add(content_type)
+                    break
         return self
 
     def create_embed(self, history: List[str], message: discord.Message, settings: Dict[str, Any]):
@@ -100,7 +117,7 @@ class Matches:
     def format_footer(self):
         _ = []
         for _type in self.matched_types:
-            if not _type in ['content']: # No point showing this
+            if not _type in ['content']: # No point showing these
                _.append(_type)
         return ' | '.join(_)
 
@@ -116,45 +133,6 @@ class Matches:
            title = title[:47] + '...'
         return title
 
-class MemberHighlight:
-    def __init__(self, **kwargs) -> None:
-        self.highlight = kwargs.get('highlight')
-
-        if not self.highlight:
-           raise TypeError('The Highlight kwargs is required..')
-
-        self.type = kwargs.get('type', 'default')
-        self.settings = kwargs.get('settings', [])
-
-        type_converter = {
-            'default': re.compile(rf'\b{re.escape(self.highlight)}\b', re.IGNORECASE),
-            'regex': re.compile(self.highlight),
-            'wildcard': re.compile(''.join([f'{re.escape(char)}[ _.{re.escape(char)}-]*' for char in self.highlight]), re.IGNORECASE)
-        }
-        self.pattern = type_converter.get(self.type)
-
-    def __repr__(self) -> str:
-        return self.highlight
-            
-    def to_dict(self):
-        return {
-            'Highlight': self.highlight,
-            'Type': self.type,
-            'Settings': self.settings
-        }
-
-    def filter_contents(self, data: Dict[str, str], force: Dict[str, bool] = {}):
-        return data
-
-    async def get_matches(self, content_dict: Dict[str, str]):
-        return_data = {'match': None, 'matched_type': None}
-        for content_type, content in content_dict.items():
-            result = self.pattern.search(content)
-            if result:
-               return_data.update(match = result, matched_type = content_type)
-               break
-        return return_data
-
 class HighlightHandler:
 
     bot: commands.Bot
@@ -163,12 +141,12 @@ class HighlightHandler:
     def __init_sublass__(cls) -> None:
         pass
 
-    def get_highlights_for_message(self, message: discord.Message) -> Dict:
+    async def get_highlights_for_message(self, message: discord.Message) -> Dict:
         highlights = {}
         
         guild_highlights, channel_highlights = (
-            self.guild_config.get(message.guild.id, {}).copy(),
-            self.channel_config.get(message.channel.id, {}).copy()
+            await self.config.guild(message.guild).all(),
+            await self.config.channel(message.channel).all()
         )
         for member_id, data in guild_highlights.get('highlights', {}).items():
             highlights.setdefault(int(member_id), []).extend(data)
@@ -178,14 +156,14 @@ class HighlightHandler:
         
         return highlights
 
-    def get_all_member_highlights(self, member: discord.Member, as_dict = False):
+    async def get_all_member_highlights(self, member: discord.Member):
+
         data = {
-            member.guild.id: self.guild_config.get(member.guild.id, {}).get('highlights', {}).get(str(member.id), [])
+            member.guild.id: (await self.config.guild(member.guild).highlights()).get(str(member.id), [])
         }
-        data.update([(channel_id, data.get('highlights', {}).get(str(member.id), [])) for channel_id, data in self.channel_config.items() if member.guild.get_channel(channel_id)])
-        if as_dict:
-            for _key, _data in data.items():
-                data[_key] = [highlight.to_dict() for highlight in _data]
+        for channel_id, config in (await self.config.all_channels()).items():
+            if member.guild.get_channel(channel_id):
+                data[channel_id] = config.get('highlights', {}).get(str(member.id), [])
 
         return data
 
@@ -217,9 +195,9 @@ class HighlightHandler:
 
     async def update_member_highlights(self, member: discord.Member, data: Dict[str, Any], action: Optional[str] = "add", channel = None):
         if channel:
-           config_method = self.config.channel(channel)
+           config_method, limit = self.config.channel(channel), 10
         else:
-           config_method = self.config.guild(member.guild)
+           config_method, limit = self.config.guild(member.guild), 25
         ret = dict(added = [], removed = [], error = {})
 
         # {'words': ['hm', 'aaaa'], 'multiple': True, 'regex': False, 'wildcard': False, 'settings': [], 'type': 'default'}
@@ -235,13 +213,16 @@ class HighlightHandler:
                     ret['error'].setdefault('The following words were not highlighted for you ->', []).append(word)
                     data['words'].remove(word)
 
-            for highlight in data['words']:
+            for i, highlight in enumerate(data['words']):
                 hl = {
                     'highlight': highlight,
                     'type': data['type'],
                     'settings': data['settings']
                 }
                 if action in ('add', None):
+                    if len(user_config) > limit:
+                        ret['error'].setdefault(f'Limit of {limit} highlights reached. Did not add the following ->', []).extend(data['words'][i:])
+                        break
                     if not any(_highlight['highlight'] == highlight for _highlight in user_config):
                         user_config.append(hl)
                         ret['added'].append(hl['highlight'])
@@ -253,32 +234,40 @@ class HighlightHandler:
                             user_config.remove(_data)
                             ret['removed'].append(_data['highlight'])                    
                         continue
-                    
-        await self.generate_cache()
         return ret
 
+    async def handle_block_update(self, ctx: commands.Context, objects: List[discord.Object], action):
+        current = await self.edit_member_blocks(ctx.author, objects, action)
+
+        member_config = self.member_config.get(ctx.guild.id, {}).get(ctx.author.id, self.default_member)
+        embed = discord.Embed(
+            title = 'Your current ignores',
+            colour = member_config['colour'],
+            timestamp = ctx.message.created_at
+        ).set_footer(text = f'{len(current)} ignores')
+
+        if (user_blocks := [ctx.guild.get_member(user).mention for user in current if ctx.guild.get_member(user) != None]):
+            embed.add_field(name = 'Users', value = '\n'.join(user_blocks))
+            
+        if (channel_blocks := [ctx.guild.get_channel(channel).mention for channel in current if ctx.guild.get_channel(channel) != None]):
+            embed.add_field(name = 'Channels', value = '\n'.join(channel_blocks))
+ 
+        await ctx.send(embed = embed)
+
+    async def edit_member_blocks(self, member: discord.Member, objects: List[discord.Object], action: Literal['add', 'remove']):
+        async with self.config.member(member).blocks() as current:
+            for obj in objects:
+                if not obj.id in current and action == 'add':
+                   current.append(obj.id)
+                elif obj.id in current and action == 'remove':
+                   current.remove(obj.id)
+
+        await self.generate_cache()
+        return current
+
     async def generate_cache(self):
-        await self.bot.wait_until_ready()
-        self.guild_config = await self.config.all_guilds()
-        self.channel_config = await self.config.all_channels()
-        self.member_config = await self.config.all_members()
         self.global_cache = await self.config.all()
-
-        self._handle_cache()
-
-    def _handle_cache(self):
-        for guild_id, data in self.guild_config.items():
-            for member_id, highlights in data.get('highlights', {}).items():
-                data['highlights'][member_id] = [MemberHighlight(**highlight) for highlight in highlights]
-
-        for channel_id, data in self.channel_config.items():
-            for member_id, synced_channel_id in data.get('synced_with', {}).items():
-                if synced_channel_id:
-                   self.channel_config[channel_id]['highlights'][member_id] = self.channel_config.get(synced_channel_id, {}).get('highlights', {}).get(member_id, [])
-
-        for channel_id, data in self.channel_config.items():
-            for member_id, highlights in data.get('highlights', {}).items():
-                data['highlights'][member_id] = [MemberHighlight(**highlight) for highlight in highlights]
+        self.member_config = await self.config.all_members()
 
     def _check_cooldown(self, seconds: int):
         return min(max(seconds, self.global_cache['cooldown']['min']), self.global_cache['cooldown']['max'])
