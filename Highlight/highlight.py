@@ -11,7 +11,7 @@ from discord.ext import commands as dpy_commands
 from redbot.core import commands, Config
 from redbot.core.utils import AsyncIter
 from redbot.core.utils.chat_formatting import humanize_list, humanize_timedelta
-from redbot.core.utils.menus import start_adding_reactions
+from redbot.core.utils.menus import start_adding_reactions, menu
 from redbot.core.utils.predicates import ReactionPredicate
 from .helpers import (
       HighlightView, 
@@ -44,7 +44,8 @@ class Highlight(HighlightHandler, commands.Cog):
               'bots': False,
               'embeds': False,
               'edits': False,
-              'colour': discord.Colour.green().value
+              'colour': discord.Colour.green().value,
+              'logs': []
           }
           self.config.register_member(**self.default_member)
           self.config.register_global(
@@ -136,6 +137,14 @@ class Highlight(HighlightHandler, commands.Cog):
                      embed = embed,
                      view =  HighlightView(message, [hl['highlight'] for hl in highlight])
                 )
+                async with self.config.member(member).logs() as logs:
+                  logs.append(
+                     {
+                        'channel_id': message.channel.id,
+                        'embed': embed.to_dict(),
+                        'highlighted_at': int(message.created_at.timestamp())
+                     }
+                  )
              except discord.HTTPException:
                 pass
              except Exception as e:
@@ -345,6 +354,18 @@ class Highlight(HighlightHandler, commands.Cog):
          _file = BytesIO(json.dumps(highlights, indent = 3).encode())
          await ctx.send(file = discord.File(_file, 'highlights.json'))
 
+      @highlight.command(name = 'logs')
+      async def highlight_logs(self, ctx: commands.Context):
+         logs = await self.config.member(ctx.author).logs()
+         pages = []
+         print(logs)
+         for data in logs:
+                pages.append(
+                   discord.Embed.from_dict(data['embed']).set_footer(text = getattr(ctx.guild.get_channel(data['channel_id']), 'name', 'deleted channel'))
+                )
+
+         await menu(ctx, pages)
+
       @highlight.group(name = 'settings', aliases = ['set'], autohelp = True, invoke_without_command = True)
       async def highlight_set(self, ctx: commands.Context):
          """Settings for Highlight."""
@@ -402,9 +423,9 @@ class Highlight(HighlightHandler, commands.Cog):
          embed = discord.Embed(
             description = '\n'.join([
                f'Cooldown: {humanize_timedelta(seconds = (data["cooldown"]))}',
-               f'Bots: {data["bots"]}',
-               f'Embeds: {data["embeds"]}',
-               f'Edits (soon): {data["edits"]}'
+               f'Bots (disabled): {data["bots"]}',
+               f'Embeds (disabled): {data["embeds"]}',
+               f'Edits (disabled + soon:tm: :thumbsup:): {data["edits"]}'
             ]),
             colour = data['colour'],
             timestamp = datetime.datetime.utcnow()
