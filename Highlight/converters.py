@@ -10,7 +10,7 @@ class NoExitParser(argparse.ArgumentParser):
 
 class HighlightFlagResolver(commands.Converter, NoExitParser):
 
-    async def convert(self, ctx: commands.Context, argument):
+    async def convert(self, ctx: commands.Context, argument: str):
         parser = NoExitParser(description = "Highlight flag resolver")
 
         parser.add_argument('words', nargs = '+', help = "Words to highlight")
@@ -28,13 +28,18 @@ class HighlightFlagResolver(commands.Converter, NoExitParser):
 
         if args['settings']:
            for setting in args['settings']:
-               if not setting in ['bots', 'embeds', 'images']:
+               if not setting in ['bots', 'embeds']:
                   await ctx.send_help()
                   raise commands.BadArgument(f'Invalid Setting \"{setting}\", read the help embed again ^^')
 
-        # one two three -m
-        e = map(lambda w: w.strip().lower(), args['words'])
-        args['words'] = list(set(e))
+        args['words'] = list(set(map(lambda w: w.strip().lower(), args['words'])))
         
         args['type'] = 'regex' if args['regex'] else 'wildcard' if args['wildcard'] else 'default'
+        
+        if args['type'] == 'regex':
+            for word in args['words']:
+                try:
+                    re.compile(word)
+                except Exception as e:
+                    raise commands.BadArgument('Invalid regex, Error Message: ' + str(e))
         return args

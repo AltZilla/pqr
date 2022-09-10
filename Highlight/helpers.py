@@ -40,7 +40,9 @@ def _message(message: discord.Message):
         return message_raw
 
 class Matches:
-    def __init__(self):
+    def __init__(self, cog: commands.Cog, member: discord.Member):
+        self.cog = cog
+        self.member = member
         self._matches = []
         self.matched_types = set()
 
@@ -63,14 +65,20 @@ class Matches:
                self._matches.remove(item)
 
     @classmethod
-    async def _resolve(cls, *args, **kwargs):
-        return await cls().resolve(*args, **kwargs)
+    async def _resolve(cls, cog, member, *args, **kwargs):
+        return await cls(cog, member).resolve(*args, **kwargs)
 
-    async def resolve(self, highlights, message):
+    async def resolve(self, highlights, message: discord.Message):
+        member_config = self.cog.get_config_for_member(self.member)
+        
+        if not member_config['bots'] and message.author.bot:
+            return self
+
         message_check = {
-            'content': message.content
+            'content': message.content,
+            'clean': message.clean_content,
+            'stem': ' '.join(stem(word) for word in message.content.split())
         }
-        re_pool = multiprocessing.Pool()
         for highlight in highlights:
             highlight_text = highlight['highlight']
             pattern = {
@@ -80,7 +88,7 @@ class Matches:
             }[highlight['type']]
 
             for content_type, content in message_check.items():
-                process = re_pool.apply_async(pattern.findall, (content,))
+                process = self.cog.re_pool.apply_async(pattern.findall, (content,))
                 task = asyncio.get_event_loop().run_in_executor(
                     None, functools.partial(process.get, timeout = 2)
                 )
@@ -100,7 +108,7 @@ class Matches:
         ).add_field(
             name = 'Source Message',
             value = f'[Jump To]({message.jump_url})'
-        ).set_footer(text = self.format_footer() + '| Triggered At')
+        ).set_footer(text = self.format_footer() + ' | Triggered At')
 
 
     def format_response(self):
@@ -170,21 +178,21 @@ class HighlightHandler:
     async def handle_highlight_update(self, ctx: commands.Context, data, **kwargs):
         ret = await self.update_member_highlights(ctx.author, data, **kwargs)
 
-        description = []
+        description, e = [], f'highlights for {kwargs.get("channel").mention}' if kwargs.get('channel') else "guild highlights"
+
+        if data['settings']:
+            description.append(
+                f'Settings Applied -> {humanize_list([italics(setting) for setting in data["settings"]])}\n'
+            )
 
         if ret['added']:
             description.append(
-                f"+ Added {humanize_list([inline(text) for text in ret['added']])} to your highlights"
+                f"Added {humanize_list([inline(text) for text in ret['added']])} to your {e}."
             )
-            if data['settings']:
-                description.append(
-                    '-----------------\n'
-                    f'Settings Applied -> {humanize_list([italics(setting) for setting in data["settings"]])}'
-                )
 
         if ret['removed']:
             description.append(
-                f"- Removed {humanize_list([inline(text) for text in ret['added']])} from your highlights"
+                f"Removed {humanize_list([inline(text) for text in ret['removed']])} from your {e}."
             )
         
         if ret['error']:
@@ -219,9 +227,13 @@ class HighlightHandler:
                     'type': data['type'],
                     'settings': data['settings']
                 }
+                if channel and len([channel_ for channel_, highlights_ in (await self.get_all_member_highlights(member)).items() if highlights_ and channel_ not in [member.guild.id, channel.id]]) >= 20:
+                    ret['error'].setdefault('Limit of `20` channels exceeded, Failed to add the following -> ', []).extend(data['words'][i:])
+                    break
+
                 if action in ('add', None):
                     if len(user_config) > limit:
-                        ret['error'].setdefault(f'Limit of {limit} highlights reached. Did not add the following ->', []).extend(data['words'][i:])
+                        ret['error'].setdefault(f'Limit of {limit} highlights reached. Failed to add the following ->', []).extend(data['words'][i:])
                         break
                     if not any(_highlight['highlight'] == highlight for _highlight in user_config):
                         user_config.append(hl)
@@ -271,6 +283,9 @@ class HighlightHandler:
 
     def _check_cooldown(self, seconds: int):
         return min(max(seconds, self.global_cache['cooldown']['min']), self.global_cache['cooldown']['max'])
+
+    def get_member_config(self, member: discord.Member):
+        return self.member_config.get(member.guild.id, {}).get(member.id, self.default_member)
     
 class HighlightView(discord.ui.View):
    def __init__(self, message: discord.Message, highlights: list):

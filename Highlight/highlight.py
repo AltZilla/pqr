@@ -77,7 +77,10 @@ class Highlight(HighlightHandler, commands.Cog):
          if await self.bot.cog_disabled_in_guild(self, message.guild):
             return
 
-         self.last_seen.setdefault(message.guild.id, {}).setdefault(message.author.id, {})[(message.channel.category or message.channel).id] = time.time()
+         #if message.author.bot:
+          #  return
+
+         self.last_seen.setdefault(message.guild.id, {}).setdefault(getattr(message.interaction, 'user', message.author).id, {})[(message.channel.category or message.channel).id] = time.time()
 
          highlights = await self.get_highlights_for_message(message=message)
 
@@ -89,7 +92,7 @@ class Highlight(HighlightHandler, commands.Cog):
                      attachments = f' <Attachments {", ".join([f"[{index}]({attach.url})" for index, attach in enumerate(message.attachments, 1)])}>' if message.attachments else '',
                      embeds = ' [embeds]' if message.embeds else ''
                )
-             ]
+         ]
 
          try: 
             async for msg in message.channel.history(limit = 4, before = message.created_at):
@@ -103,7 +106,7 @@ class Highlight(HighlightHandler, commands.Cog):
              member = message.guild.get_member(member_id)
              if not member:
                 continue
-             data = await self.config.member(member).all()
+             data = self.get_member_config(member)
              cooldown = self._check_cooldown(seconds = data['cooldown'])
              if (
                 (cd := self.cooldowns.get(message.guild.id, {}).get(member.id))
@@ -118,7 +121,7 @@ class Highlight(HighlightHandler, commands.Cog):
                 )
                 if lsc > (time.time() - 300) or len(filtered) > 2:
                    continue
-             matches = await Matches._resolve(highlights = highlight, message = message)
+             matches = await Matches._resolve(self, member, highlights = highlight, message = message)
              if not matches:
                 continue
              if (
@@ -141,6 +144,7 @@ class Highlight(HighlightHandler, commands.Cog):
                   logs.append(
                      {
                         'channel_id': message.channel.id,
+                        'highlighted_by': message.author.id,
                         'embed': embed.to_dict(),
                         'highlighted_at': int(message.created_at.timestamp())
                      }
@@ -171,9 +175,9 @@ class Highlight(HighlightHandler, commands.Cog):
          """Base command for highlights.
 
          You will not get Highlighted in a Category or Channel you have recently been 'seen' in within 5 minutes, you can get 'seen' in a channel/category by either-
+            - Sending a message.
             - Adding / Removing a reaction.
             - Trigger Typing.
-            - Sending a message.
 
          If you were last seen in more than 2 categories, you will not get highlighted for the entire guild.
          """
@@ -188,7 +192,7 @@ class Highlight(HighlightHandler, commands.Cog):
       async def highlight_channel_add(self, ctx: commands.Context, channel: Optional[Union[discord.TextChannel, discord.VoiceChannel]], *, word: HighlightFlagResolver):
          """Add words to your channel highlights.
 
-         You can add a maximum of 10 highlights per channel, there is no limit for the number for channels you can add highlights to.
+         You can add a maximum of 10 highlights per channel, there is a limit of **20** channels you can add highlights to.
 
          **Flags:**
             > `--multiple`: Add multiple words to your highlights at once.
@@ -320,15 +324,18 @@ class Highlight(HighlightHandler, commands.Cog):
 
       @highlight.command(name = 'matches')
       async def highlight_matches(self, ctx: commands.Context, *, string: str):
-         """Shows the highlights that match a given string."""
+         """Shows the highlights that match a given string.
+         
+         Currently this only shows matches for guild highlights and ignores channel highlights."""
 
-         return await ctx.reply(
-            'This command is currently disabled.'
-         )
          member_config, highlights = (
-            await self.config.member(ctx.author).all()
+            self.get_member_config(ctx.author),
+            (await self.get_all_member_highlights(ctx.author)).get(ctx.guild.id, [])
          )
-         matches = await Matches._resolve(ctx.message)
+         if not highlights:
+            return await ctx.send('You have no guild highlights, what do u want me to find matches for....')
+
+         matches = await Matches._resolve(self, highlights, ctx.message)
          description = []
          for d in highlights:
              if d['highlight'] in matches:
@@ -354,15 +361,14 @@ class Highlight(HighlightHandler, commands.Cog):
          _file = BytesIO(json.dumps(highlights, indent = 3).encode())
          await ctx.send(file = discord.File(_file, 'highlights.json'))
 
-      @highlight.command(name = 'logs')
+      @highlight.command(name = 'logs', enabled = False)
       async def highlight_logs(self, ctx: commands.Context):
-         logs = await self.config.member(ctx.author).logs()
+         logs = self.get_member_config(ctx.author)['logs']
          pages = []
-         print(logs)
          for data in logs:
-                pages.append(
-                   discord.Embed.from_dict(data['embed']).set_footer(text = getattr(ctx.guild.get_channel(data['channel_id']), 'name', 'deleted channel'))
-                )
+               pages.append(
+                  discord.Embed.from_dict(data['embed']).set_footer(text = getattr(ctx.guild.get_channel(data['channel_id']), 'name', 'deleted channel'))
+               )
 
          await menu(ctx, pages)
 
@@ -425,7 +431,7 @@ class Highlight(HighlightHandler, commands.Cog):
                f'Cooldown: {humanize_timedelta(seconds = (data["cooldown"]))}',
                f'Bots (disabled): {data["bots"]}',
                f'Embeds (disabled): {data["embeds"]}',
-               f'Edits (disabled + soon:tm: :thumbsup:): {data["edits"]}'
+               f'Edits (disabled + soon:tm:): {data["edits"]}'
             ]),
             colour = data['colour'],
             timestamp = datetime.datetime.utcnow()
