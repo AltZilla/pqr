@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import multiprocessing
 import discord
 import functools
 import re
@@ -69,7 +68,7 @@ class Matches:
         return await cls(cog, member).resolve(*args, **kwargs)
 
     async def resolve(self, highlights, message: discord.Message):
-        member_config = self.cog.get_config_for_member(self.member)
+        member_config = self.cog.get_member_config(self.member)
         
         if not member_config['bots'] and message.author.bot:
             return self
@@ -99,11 +98,11 @@ class Matches:
                     break
         return self
 
-    def create_embed(self, history: List[str], message: discord.Message, settings: Dict[str, Any]):
+    def create_embed(self, history: List[str], message: discord.Message):
         return discord.Embed(
             title = self.format_title(),
             description = '\n'.join(history),
-            colour = settings['colour'],
+            colour = self.cog.get_member_config(self.member)['colour'],
             timestamp = message.created_at
         ).add_field(
             name = 'Source Message',

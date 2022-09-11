@@ -40,7 +40,7 @@ class ChannelShowMenu(discord.ui.View):
     def handle_request(self, selected_option) -> discord.Embed:
 
         table = tabulate.tabulate(
-            self._data[int(selected_option)], headers = 'keys'
+            self._data[int(selected_option)], headers = 'keys', tablefmt = 'pretty'
         )
         obj = self._objects[int(selected_option)]
         embed = discord.Embed(
