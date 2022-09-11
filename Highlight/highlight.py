@@ -4,7 +4,6 @@ import asyncio
 import time
 import logging
 import datetime
-import multiprocessing as mp
 
 from io import BytesIO
 from discord.ext import commands as dpy_commands
@@ -60,7 +59,7 @@ class Highlight(HighlightHandler, commands.Cog):
           self.cooldowns = {}
           self.blacklist = {} # member_id -> Data
 
-          self.re_pool = mp.Pool()
+          # self.re_pool = mp.Pool()
 
       async def red_delete_data_for_user(self, *, requester: Literal["discord_deleted_user", "owner", "user", "user_strict"], user_id: int):
          ...
@@ -161,10 +160,10 @@ class Highlight(HighlightHandler, commands.Cog):
             )
             embed.add_field(
                name = 'Message',
-               value = history[0]
+               value = history[len(history)-1]
             )
             embed.set_footer(text = message.channel.name, icon_url = (message.guild.icon or message.author.avatar).url)
-            await self.bot.get_channel(897450721493012500).send(embed = embed)
+            await self.send_alert(embed = embed)
 
       @commands.Cog.listener('on_user_activity')
       async def on_user_activity(self, user: Union[discord.Member, discord.User], channel: discord.abc.Messageable):

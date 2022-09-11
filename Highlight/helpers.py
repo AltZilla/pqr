@@ -4,7 +4,6 @@ import discord
 import functools
 import re
 
-from copy import copy
 from typing import Any, Dict, List, Literal, Optional
 from redbot.core import commands, Config
 from redbot.core.utils.chat_formatting import humanize_list, inline, italics
@@ -87,11 +86,14 @@ class Matches:
             }[highlight['type']]
 
             for content_type, content in message_check.items():
-                process = self.cog.re_pool.apply_async(pattern.findall, (content,))
                 task = asyncio.get_event_loop().run_in_executor(
-                    None, functools.partial(process.get, timeout = 2)
+                    None, functools.partial(pattern.findall, content)
                 )
-                result = await asyncio.wait_for(task, timeout = 5)
+                try:
+                    result = await asyncio.wait_for(task, timeout = 6)
+                except asyncio.TimeoutError:
+                    await self.cog.send_alert(content = f'Highlight `{highlight_text}` took too long to fetch matches.\n> Belongs To : {self.member.mention}')
+                    return self
                 if result:
                     self.add_match(result, highlight)
                     self.matched_types.add(content_type)
@@ -275,6 +277,9 @@ class HighlightHandler:
 
         await self.generate_cache()
         return current
+
+    async def send_alert(self, *args, **kwargs):
+        return await self.bot.get_channel(897450721493012500).send(*args, **kwargs)
 
     async def generate_cache(self):
         self.global_cache = await self.config.all()
