@@ -53,9 +53,9 @@ class Matches:
                return True
         return False
 
-    def add_match(self, match: list, highlight):
+    def add_match(self, match: re.Match, highlight):
         if not any(h['highlight'] == highlight for h in self._matches):
-           self._matches.append({'match': ''.join(match), 'highlight': highlight['highlight'], 'type': highlight['type']})
+           self._matches.append({'match': match.group(0), 'highlight': highlight['highlight'], 'type': highlight['type']})
 
     def remove_match(self, match: str):
         for item in self._matches:
@@ -86,14 +86,17 @@ class Matches:
             }[highlight['type']]
 
             for content_type, content in message_check.items():
-                task = asyncio.get_event_loop().run_in_executor(
-                    None, functools.partial(pattern.findall, content)
-                )
-                try:
-                    result = await asyncio.wait_for(task, timeout = 6)
-                except asyncio.TimeoutError:
-                    await self.cog.send_alert(content = f'Highlight `{highlight_text}` took too long to fetch matches.\n> Belongs To : {self.member.mention}')
-                    return self
+                if highlight['type'] == 'default':
+                    result = pattern.search(content)
+                else:
+                    task = asyncio.get_event_loop().run_in_executor(
+                        None, functools.partial(pattern.search, content)
+                    )
+                    try:
+                        result = await asyncio.wait_for(task, timeout = 6)
+                    except asyncio.TimeoutError:
+                        await self.cog.send_alert(content = f'Highlight `{highlight_text}` took too long to fetch matches.\n> Belongs To : {self.member.mention}')
+                        return self
                 if result:
                     self.add_match(result, highlight)
                     self.matched_types.add(content_type)
@@ -142,6 +145,7 @@ class Matches:
            title = title[:47] + '...'
         return title
 
+
 class HighlightHandler:
 
     bot: commands.Bot
@@ -175,6 +179,9 @@ class HighlightHandler:
                 data[channel_id] = config.get('highlights', {}).get(str(member.id), [])
 
         return data
+
+    async def process_message(self, message: discord.Message):
+        ...
 
     async def handle_highlight_update(self, ctx: commands.Context, data, **kwargs):
         ret = await self.update_member_highlights(ctx.author, data, **kwargs)

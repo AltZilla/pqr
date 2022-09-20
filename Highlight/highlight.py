@@ -143,6 +143,7 @@ class Highlight(HighlightHandler, commands.Cog):
                      {
                         'channel_id': message.channel.id,
                         'highlighted_by': message.author.id,
+                        'matches': matches._matches,
                         'embed': embed.to_dict(),
                         'highlighted_at': int(message.created_at.timestamp())
                      }
