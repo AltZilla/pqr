@@ -108,7 +108,7 @@ class Highlight(HighlightHandler, commands.Cog):
             history = [msg async for msg in message.channel.history(limit = 5)][::-1]
          except (discord.NotFound, discord.Forbidden, AttributeError): # If its a voice channel, or we do can't view channel history, get history from cache instead.
             history = list(sorted(filter(lambda m: m.channel == message.channel and m.created_at < message.created_at, self.bot.cached_messages), key = lambda m: m.created_at))[:5]
-         print(highlights)
+
          members_highlighted = []
          async for member_id, highlight in AsyncIter(highlights.items(), steps = 1000):
             member = message.guild.get_member(member_id)
@@ -131,7 +131,6 @@ class Highlight(HighlightHandler, commands.Cog):
             matches = await Matches._resolve(self, member, highlights = highlight, message = message)
             if not matches:
                continue
-            print(member.name, matches.member.name, matches._matches)
             if (
                not message.channel.permissions_for(member).read_message_history
                or not message.channel.permissions_for(member).read_messages
