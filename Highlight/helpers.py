@@ -2,6 +2,7 @@ import asyncio
 import logging
 import discord
 import functools
+import TagScriptEngine as tse
 import re
 
 from typing import Any, Dict, List, Literal, Optional
@@ -63,12 +64,12 @@ class Matches:
                self._matches.remove(item)
 
     @classmethod
-    async def _resolve(cls, cog, member, *args, **kwargs):
-        return await cls(cog, member).resolve(*args, **kwargs)
+    def _resolve(cls, cog, member, *args, **kwargs):
+        return cls(cog, member).resolve(*args, **kwargs)
 
     async def resolve(self, highlights, message: discord.Message):
         member_config = self.cog.get_member_config(self.member)
-        
+        print(self.member.name, highlights)
         if not member_config['bots'] and message.author.bot:
             return self
 
@@ -103,16 +104,35 @@ class Matches:
                     break
         return self
 
-    def create_embed(self, history: List[str], message: discord.Message):
-        return discord.Embed(
+    async def response_mapping(self, history: List[discord.Message], override_config = None):
+        user_conf, desc = (
+            override_config or self.cog.get_member_config(self.member), 
+            []
+        )
+        content = await self.cog.tagscript_interpreter.process(
+            user_conf['format']['content'], seed_variables = self.cog.get_adapters_for_message(history[-1], matches = self)
+        )
+        for msg in history:
+            seed_variables = self.cog.get_adapters_for_message(msg, matches = self)
+            resp = await self.cog.tagscript_interpreter.process(
+                user_conf['format']['history'], seed_variables = seed_variables
+            )
+            desc.append(resp.body)
+
+        embed = discord.Embed(
             title = self.format_title(),
-            description = '\n'.join(history),
-            colour = self.cog.get_member_config(self.member)['colour'],
-            timestamp = message.created_at
+            description = '\n'.join(desc),
+            colour = user_conf['colour'],
+            timestamp = history[0].created_at
         ).add_field(
             name = 'Source Message',
-            value = f'[Jump To]({message.jump_url})'
+            value = f'[Jump To]({history[0].jump_url})'
         ).set_footer(text = self.format_footer() + ' | Triggered At')
+
+        return {
+            'content': content.body,
+            'embed': embed
+        }
 
 
     def format_response(self):
@@ -145,6 +165,26 @@ class Matches:
            title = title[:47] + '...'
         return title
 
+class MatchAdapter(tse.AttributeAdapter):
+    __slots__ = ("object", "_attributes", "_methods")
+
+    def __init__(self, base):
+        self.object = base
+        self._attributes = {
+            "count": len(self.object._matches)
+        }
+        self._methods = {
+            "format_response": self.object.format_response
+        }
+    
+class MessageAdapter(tse.AttributeAdapter):
+
+    def update_attributes(self):
+        additional_attributes  = {
+            'content': self.object.content[:250],
+            'clean_content':self.object.clean_content[:250],
+        }
+        self._attributes.update(additional_attributes)
 
 class HighlightHandler:
 
@@ -181,7 +221,7 @@ class HighlightHandler:
         return data
 
     async def process_message(self, message: discord.Message):
-        ...
+        pass
 
     async def handle_highlight_update(self, ctx: commands.Context, data, **kwargs):
         ret = await self.update_member_highlights(ctx.author, data, **kwargs)
@@ -285,6 +325,12 @@ class HighlightHandler:
         await self.generate_cache()
         return current
 
+    async def create_matches(self, member: discord.Member, message: discord.Message, highlights: List[Dict[str, Any]], dummy: bool = False):
+        if dummy:
+            return Matches(self, member, init_matches = [{'match': match, 'highlight': match, 'type': 'default'} for match in ['Match 1', 'Match 2']])
+
+        return await Matches._resolve(self, member, highlights = highlights, message = message)
+
     async def send_alert(self, *args, **kwargs):
         return await self.bot.get_channel(897450721493012500).send(*args, **kwargs)
 
@@ -297,6 +343,26 @@ class HighlightHandler:
 
     def get_member_config(self, member: discord.Member):
         return self.member_config.get(member.guild.id, {}).get(member.id, self.default_member)
+
+    def mark_last_seen(self, member: discord.Member, channel: discord.abc.Messageable, event_type: Literal['message', 'reaction', 'typing']):
+        if not isinstance(member, discord.Member) or isinstance(channel, (discord.Thread, discord.DMChannel)): # User triggered an event
+            return
+        
+        config = self.get_member_config(member = member)
+        if not config['last_seen'].get(event_type, False):
+            return
+        
+        self.last_seen.setdefault(channel.guild.id, {}).setdefault(member.id, {})[(channel.category or channel).id] = discord.utils.utcnow().timestamp()
+
+    def get_adapters_for_message(self, message: discord.Message, matches: Matches, format_name: str = 'content'):
+        ret = {
+            'guild': tse.GuildAdapter(message.guild),
+            'channel': tse.ChannelAdapter(message.channel),
+            'author': tse.MemberAdapter(message.author),
+            'message': MessageAdapter(message),
+            'matches': MatchAdapter(Matches)
+        }
+        return ret
     
 class HighlightView(discord.ui.View):
    def __init__(self, message: discord.Message, highlights: list):
