@@ -5,7 +5,7 @@ import functools
 import TagScriptEngine as tse
 import re
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
 from redbot.core import commands, Config
 from redbot.core.utils.chat_formatting import humanize_list, inline, italics
 from stemming.porter2 import stem
@@ -54,14 +54,55 @@ class Matches:
                return True
         return False
 
-    def add_match(self, match: re.Match, highlight):
+    def add_match(self, match: str, highlight):
         if not any(h['highlight'] == highlight for h in self._matches):
-           self._matches.append({'match': match.group(0), 'highlight': highlight['highlight'], 'type': highlight['type']})
+           self._matches.append({'match': match, 'highlight': highlight['highlight'], 'type': highlight['type']})
 
     def remove_match(self, match: str):
         for item in self._matches:
             if item['match'] == match:
                self._matches.remove(item)
+
+    def search(self, string: str, to_search: str, max_repetitions: int = 0, bypass_chars: List[str] = [], max_bypass: int = 0, check_seperate: Dict[str, bool] = {'start': True, 'end': True}) -> Optional[Tuple[int, int]]:
+
+        _match = [None, None, None, None]
+        prev_char = None
+        repetitions = bypasses = i = 0
+
+        to_search = to_search.lower()
+
+        while i < len(string):
+            char = string[i].lower()
+            # Check if the first char matches the current char in string and we arent already matching it 
+            if char == to_search[0] and _match[0] is None:
+                _match[0], _match[3], prev_char = i, 0, char
+                if len(to_search) == 1: # no char after this
+                    _match[1] = i + 1
+                    break
+            # If we pass this then we r attempting to match a part of the string
+            elif _match[0] is not None:
+                index = _match[3] + 1
+                if char == to_search[index]:
+                    _match[3] += 1
+                    repetitions = 0
+                    # finished searching
+                    if index >= len(to_search) - 1:
+                        _match[1] = i + 1
+                        break
+                elif char in bypass_chars and max_bypass > bypasses: # ignore these
+                    i += 1; bypasses += 1
+                    continue # so we do not mark this as the prev character
+                elif char == prev_char and max_repetitions > repetitions:
+                    repetitions += 1
+                else:
+                    _match, repetitions = [None, None, None, None], 0
+                    continue # we dont want to ignore the current character
+            prev_char, bypasses = char, 0
+            i += 1
+
+        start, end = (_match[0], _match[1])
+        if start and end:
+            return string[start:end]
 
     @classmethod
     def _resolve(cls, cog, member, *args, **kwargs):
@@ -69,7 +110,7 @@ class Matches:
 
     async def resolve(self, highlights, message: discord.Message):
         member_config = self.cog.get_member_config(self.member)
-        print(self.member.name, highlights)
+
         if not member_config['bots'] and message.author.bot:
             return self
 
@@ -80,21 +121,23 @@ class Matches:
         }
         for highlight in highlights:
             highlight_text = highlight['highlight']
-            pattern = {
-                'default': re.compile(rf'\b{re.escape(highlight_text)}\b', re.IGNORECASE),
-                'regex': re.compile(highlight_text),
-                'wildcard': re.compile(''.join([f'{re.escape(char)}[ _.{re.escape(char)}-]*' for char in highlight_text]), re.IGNORECASE)
-            }[highlight['type']]
+            #pattern = {
+            #   'default': re.compile(rf'\b{re.escape(highlight_text)}\b', re.IGNORECASE),
+            #   'regex': re.compile(highlight_text),
+            #   'wildcard': re.compile(''.join([f'{re.escape(char)}[ _.{re.escape(char)}-]*' for char in highlight_text]), re.IGNORECASE)
+            #}[highlight['type']]
 
             for content_type, content in message_check.items():
                 if highlight['type'] == 'default':
-                    result = pattern.search(content)
+                    result = self.search(content, highlight_text)
+                elif highlight['type'] == 'wildcard':
+                    result = self.search(content, highlight_text, **member_config['wildcard'])
                 else:
                     task = asyncio.get_event_loop().run_in_executor(
-                        None, functools.partial(pattern.search, content)
+                        None, functools.partial(re.compile(highlight_text).search, content)
                     )
                     try:
-                        result = await asyncio.wait_for(task, timeout = 6)
+                        result = (await asyncio.wait_for(task, timeout = 6)).group(0)
                     except asyncio.TimeoutError:
                         await self.cog.send_alert(content = f'Highlight `{highlight_text}` took too long to fetch matches.\n> Belongs To : {self.member.mention}')
                         return self
@@ -299,7 +342,7 @@ class HighlightHandler:
     async def handle_block_update(self, ctx: commands.Context, objects: List[discord.Object], action):
         current = await self.edit_member_blocks(ctx.author, objects, action)
 
-        member_config = self.member_config.get(ctx.guild.id, {}).get(ctx.author.id, self.default_member)
+        member_config = self.get_member_config(ctx.author)
         embed = discord.Embed(
             title = 'Your current ignores',
             colour = member_config['colour'],
@@ -342,7 +385,7 @@ class HighlightHandler:
         return min(max(seconds, self.global_cache['cooldown']['min']), self.global_cache['cooldown']['max'])
 
     def get_member_config(self, member: discord.Member):
-        return self.member_config.get(member.guild.id, {}).get(member.id, self.default_member)
+        return self.member_config.get(member.guild.id, {}).get(member.id, self.config.defaults['MEMBER'])
 
     def mark_last_seen(self, member: discord.Member, channel: discord.abc.Messageable, event_type: Literal['message', 'reaction', 'typing']):
         if not isinstance(member, discord.Member) or isinstance(channel, (discord.Thread, discord.DMChannel)): # User triggered an event

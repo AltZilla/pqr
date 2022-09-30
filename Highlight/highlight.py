@@ -40,32 +40,32 @@ class Highlight(HighlightHandler, commands.Cog):
       def __init__(self, bot: commands.Bot):
          self.bot = bot
          self.config = Config.get_conf(self, identifier = 1698497658475, force_registration = True)
-         self.default_member = {
-            'blocks': [],
-            'cooldown': 60,
-            'bots': False,
-            'embeds': False,
-            'edits': False,
-            'last_seen': {
-               'messages': True,
-               'reactions': True,
-               'typing': True,
-               'category_threshold': 2,
-               'timeout': 300
-            },
-            'format': {
-               'content': 'In **{guild(name)}** {channel(mention)}, you were mentioned with the highlight {if({matches(count)} > 1):words|word} {matches(format_response)}',
-               'history': '[<t:{message(timestamp)}:T>] **{author}**: {message(content)}'
-            },
-            'colour': discord.Colour.green().value,
-            'logs': []
-         }
-         self.config.register_member(**self.default_member)
+         self.config.register_member(
+            blocks = [],
+            cooldown = 60,
+            bots = False,
+            embeds = False,
+            edits = False,
+            colour = discord.Colour.green().value,
+            logs = [],
+            ### last seen settings
+            last_seen__messages = True,
+            last_seen__reactions = True,
+            last_seen__typing = True,
+            last_seen__offline = False,
+            last_seen__category_threshold = 2,
+            last_seen__timeout = 300,
+            ### format settings
+            format__content = 'In **{guild(name)}** {channel(mention)}, you were mentioned with the highlight {if({matches(count)} > 1):words|word} {matches(format_response)}',
+            format__history = '[<t:{message(timestamp)}:T>] **{author}**: {message(content)}',
+            ### wildcard settings
+            wildcard__max_repetitions = 2,
+            wildcard__bypass_chars = ['_', '-', ' '],
+            wildcard__max_bypass = 5
+         )
          self.config.register_global(
             cooldown__min = 30,
-            cooldown__max = 600,
-            len__min = 2,
-            len__max = 50
+            cooldown__max = 600
          )
          self.config.register_guild(highlights = {}, allowed_roles = [])
          self.config.register_channel(highlights = {}, synced_with = {})
@@ -101,13 +101,9 @@ class Highlight(HighlightHandler, commands.Cog):
 
          self.mark_last_seen(getattr(message.interaction, 'user', message.author), message.channel, 'message')
 
-         highlights = await self.get_highlights_for_message(message=message)
+         highlights, history = await self.get_highlights_for_message(message=message), None
 
          # f'[<t:{int(msg.created_at.timestamp())}:T>] **{msg.author}:** {msg.content[:200]}'
-         try: 
-            history = [msg async for msg in message.channel.history(limit = 5)][::-1]
-         except (discord.NotFound, discord.Forbidden, AttributeError): # If its a voice channel, or we do can't view channel history, get history from cache instead.
-            history = list(sorted(filter(lambda m: m.channel == message.channel and m.created_at < message.created_at, self.bot.cached_messages), key = lambda m: m.created_at))[:5]
 
          members_highlighted = []
          async for member_id, highlight in AsyncIter(highlights.items(), steps = 1000):
@@ -118,7 +114,7 @@ class Highlight(HighlightHandler, commands.Cog):
             if (
                (cd := self.cooldowns.get(message.guild.id, {}).get(member.id))
                and cd >= (time.time() - self._check_cooldown(seconds = data['cooldown']))
-            ): 
+            ):
                continue
             last_seen, ls_conf = self.last_seen.get(message.guild.id, {}).get(member.id), data['last_seen']
             if last_seen:
@@ -139,6 +135,12 @@ class Highlight(HighlightHandler, commands.Cog):
             if any(x.id in data['blocks'] for x in [message.author, message.channel]):
                continue
             self.cooldowns.setdefault(message.guild.id, {})[member.id] = time.time()
+            # fetch history only if sm1 has been highlight
+            if history is None:
+               try: 
+                  history = [msg async for msg in message.channel.history(limit = 5)][::-1]
+               except (discord.NotFound, discord.Forbidden, AttributeError): # If its a voice channel, or we do can't view channel history, get history from cache instead.
+                  history = list(sorted(filter(lambda m: m.channel == message.channel and m.created_at <= message.created_at, self.bot.cached_messages), key = lambda m: m.created_at))[:5]
 
             resp = await matches.response_mapping(history = history)
             # f'In **{message.guild.name}** {message.channel.mention}, you were mentioned with the highlighted word{"s" if len(matches) > 1 else ""} {matches.format_response()}.'
@@ -168,7 +170,7 @@ class Highlight(HighlightHandler, commands.Cog):
             )
             embed.add_field(
                name = 'Message',
-               value = history[len(history)-1].content[:500]
+               value = history[-1].content[:500]
             )
             embed.set_footer(text = message.channel.name, icon_url = (message.guild.icon or message.author.avatar).url)
             await self.send_alert(embed = embed)
@@ -462,11 +464,11 @@ class Highlight(HighlightHandler, commands.Cog):
 
       @highlight_set.group(name = 'response', autohelp = True)
       async def highlight_response(self, ctx: commands.Context):
-         """Configure the highlight-message.
+         """[Soon] Configure the highlight-message.
          
          This uses TagScript :thumbsup:"""
 
-      @highlight_response.command(name = 'content')
+      @highlight_response.command(name = 'content', enabled = False)
       async def highlight_response_content(self, ctx: commands.Context, *, body: str):
          """That lil message above the embed"""
          if len(body) > 250:
@@ -481,7 +483,7 @@ class Highlight(HighlightHandler, commands.Cog):
             resp['content']
          )
 
-      @highlight_response.command(name = 'history')
+      @highlight_response.command(name = 'history', enabled = False)
       async def highlight_response_history(self, ctx: commands.Context, *, body: str):
          """The history format :thumbsup:"""
          if len(body) > 250:
@@ -501,20 +503,20 @@ class Highlight(HighlightHandler, commands.Cog):
          """Shows your highlight settings."""
 
          data = self.get_member_config(ctx.author)
-         _ansi = lambda word, s1 = 1, s2 = 1, s3 = 34: f'[{s1};{s2};{s3}m{word}[0m'
+         _ansi = lambda word, s1 = 1, s2 = 1, s3 = 34: f'[{s1};{s2};{s3}m[{word}][0m'
 
          def bool_str(bool_obj: bool, ansi = True):
-            ret = '[Enabled]' if bool_obj else '[Disabled]'
+            ret = 'Enabled' if bool_obj else 'Disabled'
             if ansi:
                ret = _ansi(ret, 1, 1, 32 if bool_obj else 31)
             return ret
 
-         last_seen, format = data['last_seen'], data['format']
+         last_seen, format, wildcard = data['last_seen'], data['format'], data['wildcard']
          pages = [
             discord.Embed(
                description = '\n'.join([
-                  f'--------- Highlight Settings --------',
-                  f'Cooldown:          {humanize_timedelta(seconds = (data["cooldown"]))}',
+                  f'------- Highlight Settings ------',
+                  f'Cooldown:          {_ansi(humanize_timedelta(seconds = (data["cooldown"])))}',
                   f'Bots:              {bool_str(data["bots"])}',
                   f'Embeds:            {bool_str(data["embeds"])}',
                   f'Edits:             {bool_str(data["edits"])}'
@@ -522,22 +524,38 @@ class Highlight(HighlightHandler, commands.Cog):
             )),
             discord.Embed(
                description = '\n'.join([
-                  f'--------- Last Seen Settings --------',
-                  f'Cache Timeout:       {humanize_timedelta(seconds = (last_seen["timeout"]))}',
+                  f'--------- Last-Seen Settings --------',
+                  f'Cache Timeout:       {_ansi(humanize_timedelta(seconds = (last_seen["timeout"])))}',
                   f'Messages:            {bool_str(last_seen["messages"])}',
                   f'Reactions:           {bool_str(last_seen["reactions"])}',
                   f'Typing:              {bool_str(last_seen["typing"])}',
-                  f'Category Threshold:  [{last_seen["category_threshold"]}]'
+                  f'Category Threshold:  {_ansi(last_seen["category_threshold"])}'
                ]
-            ))
+            )),
+            discord.Embed(
+               description = '\n'.join([
+                  f'--------- Wildcard Settings --------',
+                  f'Max Char Repetitions:       {_ansi(wildcard["max_repetitions"])}',
+                  f'Bypass Characters:          {_ansi("".join(wildcard["bypass_chars"]))}',
+                  f'Max Char Bypasses:          {_ansi(wildcard["max_bypass"])}'
+               ]
+            )),
+            discord.Embed(title = 'Response Format',)
+               .add_field(name = 'Content', value = box(format['content'], lang = 'md'), inline = False)
+               .add_field(name = 'History', value = box(format['history'], lang = 'md'), inline = False)
          ]
          for page in pages:
-            page.description = box(page.description, lang = 'ansi')
+            page.description = box(page.description, lang = 'ansi') if page.description else None
             page.colour = data['colour']
             page.set_footer(text = f'Colour: #{hex(data["colour"])}')
 
          menu = SimpleMenu(pages = pages, use_select_menu=True, use_select_only=True)
-         menu.select_menu.options = [discord.SelectOption(label = 'Highlight Settings', value = 0), discord.SelectOption(label = 'Last-Seen Settings', value = 1)]
+         menu.select_menu.options = [
+            discord.SelectOption(label = 'Highlight Settings', value = 0), 
+            discord.SelectOption(label = 'Last-Seen Settings', value = 1),
+            discord.SelectOption(label = 'Wildcard Settings', value = 2),
+            discord.SelectOption(label = 'Response Format', value = 3),
+         ]
          await menu.start(ctx)
 
       @highlight_set.command(name = 'roles')
