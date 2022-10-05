@@ -129,7 +129,7 @@ class Matches:
 
             for content_type, content in message_check.items():
                 if highlight['type'] == 'default':
-                    result = self.search(content, highlight_text)
+                    result = re.search(rf'\b{re.escape(highlight_text)}\b', content, flags = re.I).group(0)
                 elif highlight['type'] == 'wildcard':
                     result = self.search(content, highlight_text, **member_config['wildcard'])
                 else:

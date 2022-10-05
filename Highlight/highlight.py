@@ -93,7 +93,7 @@ class Highlight(HighlightHandler, commands.Cog):
       @commands.Cog.listener('on_message')
       async def on_message(self, message: discord.Message):
 
-         if not message.guild or isinstance(message.channel, (discord.DMChannel,discord.Thread)):
+         if not message.guild or isinstance(message.channel, (discord.DMChannel, discord.Thread)):
             return
 
          if await self.bot.cog_disabled_in_guild(self, message.guild):
@@ -375,32 +375,38 @@ class Highlight(HighlightHandler, commands.Cog):
       @highlight.command(name = 'matches')
       async def highlight_matches(self, ctx: commands.Context, *, string: str):
          """Shows the highlights that match a given string.
-         
-         Currently this only shows matches for guild highlights and ignores channel highlights."""
+         """
 
          member_config, highlights = (
             self.get_member_config(ctx.author),
-            (await self.get_all_member_highlights(ctx.author)).get(ctx.guild.id, [])
+            await self.get_all_member_highlights(ctx.author)
          )
          if not highlights:
-            return await ctx.send('You have no guild highlights, what do u want me to find matches for....')
+            return await ctx.send('You have no guild highlights :thumbsup:')
 
-         matches = await Matches._resolve(self, ctx.author, highlights, ctx.message)
-         description = []
-         for d in highlights:
-             if d['highlight'] in matches:
-                description.append('✅ ' + d['highlight'])
-             else:
-                description.append('❌ ' + d['highlight'])
+         pages, options = [], []
+         for _id, highlight in highlights.items():
+            matches, guild, channel = await Matches._resolve(self, ctx.author, highlight, ctx.message), self.bot.get_guild(_id), self.bot.get_channel(_id)
+            description = []
+            for d in highlight:
+               if d['highlight'] in matches:
+                  description.append('✅ ' + d['highlight'])
+               else:
+                  description.append('❌ ' + d['highlight'])
+            embed = discord.Embed(
+               title = f'Matches ( #{getattr(channel, "name", "Unknown Channel")} )' if not guild else "Matches",
+               description = '\n'.join(description),
+               timestamp = datetime.datetime.utcnow(),
+               colour = member_config['colour']
+            ).set_footer(text = f'{len(matches)} matches')
+            pages.append(embed)
+            options.append(
+               discord.SelectOption(label = f'# {getattr(channel, "name", "Unknown Channel")}' if not guild else getattr(guild, "name", "Unknown Guild"), description = f'Matches -> {len(matches)}', value = pages.index(embed))
+            )
 
-         embed = discord.Embed(
-             title = 'Matches',
-             description = '\n'.join(description),
-             timestamp = datetime.datetime.utcnow(),
-             colour = member_config.get('colour', 0x00ff00)
-         ).set_footer(text = f'{len(matches)} matches')
-
-         return await ctx.reply(embed = embed)
+         menu = SimpleMenu(pages = pages, use_select_menu = True)
+         menu.select_menu.options = options[:25]
+         await menu.start(ctx)
 
       @highlight.command(name = 'export')
       async def highlight_export(self, ctx: commands.Context):
@@ -508,7 +514,7 @@ class Highlight(HighlightHandler, commands.Cog):
          def bool_str(bool_obj: bool, ansi = True):
             ret = 'Enabled' if bool_obj else 'Disabled'
             if ansi:
-               ret = _ansi(ret, 1, 1, 32 if bool_obj else 31)
+               ret = _ansi(ret, 1, 1, 36 if bool_obj else 31)
             return ret
 
          last_seen, format, wildcard = data['last_seen'], data['format'], data['wildcard']
