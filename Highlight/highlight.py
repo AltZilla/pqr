@@ -70,7 +70,7 @@ class Highlight(HighlightHandler, commands.Cog):
       @commands.Cog.listener('on_message')
       async def on_message(self, message: discord.Message):
 
-         if not message.guild or isinstance(message.channel, discord.DMChannel):
+         if not message.guild or isinstance(message.channel, (discord.Thread, discord.VoiceChannel, discord.DMChannel)):
             return
 
          if await self.bot.cog_disabled_in_guild(self, message.guild):
